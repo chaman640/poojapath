@@ -1,0 +1,259 @@
+# 🪔 Pooja Path
+
+Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna design aur apna content.
+
+**Khaas baat:** koi login/password nahi. Devotee sirf **naam, gotra aur mobile number** bharta hai — saari update usi number par WhatsApp se chali jaati hai.
+
+---
+
+## Isme kya-kya hai
+
+**Website (public)**
+
+- Homepage — hero, trust bar, aane wali pujaayein, "kaise kaam karta hai", chadhava, testimonials, FAQ
+- Upcoming Pujas — search + category filter
+- Puja detail page — laabh, vidhi, mandir ki jaankari, packages, booking form
+- Booking — bina login, sirf naam/gotra/number (+ optional pata prasad ke liye)
+- Razorpay payment (UPI, card, netbanking)
+- Booking status page + "Track Booking" (Booking ID + number se)
+- Chadhava (offerings) aur Divine Store (products)
+- About, Contact (form ke saath), Privacy / Terms / Refund / Shipping
+- **Hindi ⇄ English toggle** — poori site, ek click me
+
+**Admin panel** (`/admin`)
+
+- Secure login (bcrypt + JWT cookie + account lockout)
+- Dashboard — bookings, revenue, pending payments
+- Bookings — search, filter, status update, video link, prasad tracking
+- Puja add/edit — dono bhasha me, packages aur pricing ke saath
+- Contact messages
+- Settings — environment status + password change
+
+---
+
+## Technology (aur kyun)
+
+| Cheez | Kya | Kyun |
+|---|---|---|
+| Framework | **Next.js 16** (App Router) | Fast, SEO-friendly, ek hi project me frontend + backend |
+| Language | TypeScript | Galtiyan likhte waqt hi pakdi jaati hain |
+| Styling | Tailwind CSS | Poora design custom, koi bhaari UI library nahi |
+| Database | **PostgreSQL** + Drizzle ORM | Reliable; saari queries parameterised (SQL injection se surakshit) |
+| Payment | **Razorpay** | India ka standard — UPI/card/netbanking |
+| WhatsApp | AiSensy ya Interakt | `.env` me key daalte hi chalu |
+| Hosting | **Render** | Free tier, auto HTTPS, ek click deploy |
+
+`npm audit` par abhi **0 vulnerabilities** hain. Koi image/font local nahi — saari artwork SVG me code se banti hai, isliye site halki hai aur kisi ki copyright chori nahi.
+
+---
+
+## Security — kya-kya kiya gaya hai
+
+| Khatra | Bachaav |
+|---|---|
+| SQL injection | Drizzle ORM — har query parameterised, kahin string joining nahi |
+| XSS | React auto-escaping + input me `<` `>` block + JSON-LD escape + `javascript:` links block |
+| CSRF | Cookie `SameSite=Lax` + har POST par Origin verify + Server Actions ka built-in check |
+| Password chori | bcrypt (12 rounds), plain password kahin store nahi |
+| Brute force login | 6 galat koshish → account 30 min lock; IP par bhi rate limit |
+| Session hijack | JWT `httpOnly` + `Secure` cookie, 8 ghante me expire, `tokenVersion` se turant invalidate |
+| Admin bypass | Auth **har page aur har action me** server-side check hota hai — middleware par bharosa nahi (wo bypass ho sakta hai) |
+| Payment tampering | Amount hamesha database se, kabhi browser se nahi; Razorpay signature HMAC verify + server-to-server confirm |
+| Fake webhook | `x-razorpay-signature` HMAC verify — bina sahi signature ke reject |
+| Spam bookings/messages | IP rate limiting + contact form me honeypot |
+| Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block |
+| Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` |
+| Data leak | IP plain me store nahi (sirf hash); admin pages `noindex` + `no-store` |
+| Secrets | Sab `.env` me, `.gitignore` me — code me kahin hardcode nahi |
+
+Security headers (CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy) `next.config.ts` me set hain.
+
+---
+
+## Local par chalane ke liye
+
+```bash
+# 1. Dependencies
+npm install
+
+# 2. Environment file
+cp .env.example .env
+#    .env kholein aur DATABASE_URL + AUTH_SECRET bhar dein
+
+# 3. Database tables banayein
+npm run db:migrate
+
+# 4. Demo content daalein (pujas, temples, testimonials, admin user)
+npm run db:seed
+
+# 5. Chalu karein
+npm run dev
+```
+
+Site: <http://localhost:3000> • Admin: <http://localhost:3000/admin>
+
+AUTH_SECRET banane ke liye:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```
+
+---
+
+## Render par deploy (step by step)
+
+### Tarika 1 — Blueprint (sabse aasan)
+
+1. Project GitHub par push karein
+2. Render → **New +** → **Blueprint** → apna repo chunein
+3. Render `render.yaml` padh kar database aur web service dono bana dega
+4. `ADMIN_PASSWORD` maanga jayega — ek strong password dein
+5. Deploy hone ke baad **Environment** tab me `NEXT_PUBLIC_SITE_URL` apne asli domain par set karein
+
+### Tarika 2 — Manually
+
+1. **Database banayein:** Render → New + → PostgreSQL → naam `pooja-path-db`, plan Free, region **Singapore**. Ban jaane par **Internal Database URL** copy kar lein.
+
+2. **Web service banayein:** New + → Web Service → apna repo → settings:
+
+   | Field | Value |
+   |---|---|
+   | Runtime | Node |
+   | Build Command | `npm ci && npm run db:migrate && npm run db:seed && npm run build` |
+   | Start Command | `npm start` |
+   | Health Check Path | `/` |
+
+3. **Environment variables** (Environment tab me):
+
+   ```
+   DATABASE_URL              = (upar wala Internal Database URL)
+   AUTH_SECRET               = (48 byte random — upar wali command se)
+   NEXT_PUBLIC_SITE_URL      = https://aapka-domain.com
+   NEXT_PUBLIC_SITE_NAME     = Pooja Path
+   NEXT_PUBLIC_SUPPORT_PHONE = +91XXXXXXXXXX
+   NEXT_PUBLIC_SUPPORT_WHATSAPP = +91XXXXXXXXXX
+   NEXT_PUBLIC_SUPPORT_EMAIL = support@aapka-domain.com
+   ADMIN_EMAIL               = aap@example.com
+   ADMIN_PASSWORD            = (strong password — pehli baar login ke liye)
+   NODE_VERSION              = 22
+   ```
+
+4. **Deploy** dabayein. Pehla build ~3-5 minute lega.
+
+5. **Domain lagayein:** Settings → Custom Domain → apna domain add karke DNS me CNAME point kar dein. HTTPS Render khud laga deta hai.
+
+> **Free plan ka dhyaan rakhein:** free web service 15 minute inactivity ke baad so jaati hai (agli request 30-50 sec leti hai), aur free database 30 din baad expire hota hai. Asli traffic aane par paid plan (~$7/month) le lena.
+
+---
+
+## Razorpay chalu karna (jab account ban jaye)
+
+1. [razorpay.com](https://razorpay.com) par account + KYC (PAN, bank account, business proof)
+2. Dashboard → **Settings → API Keys → Generate Key** — Key ID aur Secret milega
+3. Render → Environment me daalein:
+   ```
+   RAZORPAY_KEY_ID     = rzp_live_xxxxxxxx
+   RAZORPAY_KEY_SECRET = xxxxxxxxxxxxxxxx
+   ```
+4. Dashboard → **Settings → Webhooks → Add New Webhook**
+   - URL: `https://aapka-domain.com/api/payment/webhook`
+   - Secret: ek random string banayein
+   - Events: `payment.captured`, `payment.failed`, `order.paid`
+   - Wahi secret Render me `RAZORPAY_WEBHOOK_SECRET` me daalein
+5. **Redeploy** karein — bas, payment live ho gaya.
+
+Jab tak keys khaali hain, site **Demo Mode** me chalti hai: booking ban jaati hai par paisa nahi katta. Testing ke liye pehle `rzp_test_` keys use karein.
+
+> KYC ke liye Razorpay website par Privacy Policy, Terms, Refund aur Shipping page maangta hai — ye chaaron page site me pehle se bane hue hain (`/legal/...`).
+
+---
+
+## WhatsApp updates chalu karna
+
+**AiSensy** (`aisensy.com`) ya **Interakt** (`interakt.ai`) — dono me se koi ek. Dono par WhatsApp Business API account chahiye (~₹999/month se).
+
+1. Provider par 2 template approve karwayein:
+   - `booking_confirmed` — 6 variables: naam, booking ID, puja, tithi, amount, link
+   - `booking_status_update` — 5 variables: naam, booking ID, status, detail, link
+2. Render Environment me:
+   ```
+   WHATSAPP_PROVIDER = aisensy
+   AISENSY_API_KEY   = xxxxxxxx
+   ```
+   (ya `interakt` + `INTERAKT_API_KEY`)
+3. Redeploy — bas.
+
+Jab tak key nahi hai, message server log me print hote hain (`[whatsapp:demo] ...`) — site normal chalti rahti hai.
+
+---
+
+## Roz ka kaam (admin panel)
+
+| Kaam | Kahan |
+|---|---|
+| Nayi puja daalna | Admin → Pujas → **+ Nayi puja add karein** |
+| Puja chhupana/dikhana | Pujas list me **Live / Hidden** button |
+| Booking dekhna | Admin → Bookings (search: ID, naam, phone) |
+| Video bhejna | Booking kholein → status **Video shared** + link daalein → Update |
+| Prasad tracking | Status **Prasad dispatched** + tracking number → Update |
+| Contact messages | Admin → Messages |
+| Password badalna | Admin → Settings |
+
+Har status update par devotee ko WhatsApp message apne aap chala jaata hai (agar usne opt-in kiya ho).
+
+---
+
+## Useful commands
+
+```bash
+npm run dev          # local development
+npm run build        # production build
+npm start            # production server
+npm run db:migrate   # naye database tables banayein/update karein
+npm run db:seed      # demo content (pehli baar hi chalta hai)
+npm run db:generate  # schema badalne par naya SQL migration banayein
+npm run lint         # code check
+npm audit            # security check
+```
+
+---
+
+## Project ka dhaancha
+
+```
+pooja-path/
+├── drizzle/              # SQL migrations
+├── scripts/              # migrate.ts, seed.ts
+├── src/
+│   ├── app/
+│   │   ├── (site)/       # public website
+│   │   ├── admin/        # admin panel (login + panel)
+│   │   ├── api/          # bookings, payment, track, contact
+│   │   └── layout.tsx
+│   ├── components/       # Navbar, Hero, PujaCard, BookingForm, SacredArt…
+│   ├── db/               # schema.ts (tables), index.ts (connection)
+│   └── lib/              # auth, razorpay, whatsapp, validation, rate-limit, i18n
+├── .env.example
+├── render.yaml
+└── next.config.ts        # security headers
+```
+
+---
+
+## Content badalna
+
+- **Pujas, packages, prices** → admin panel se
+- **Site ka naam, phone, email** → `.env` / Render Environment
+- **Menu, buttons, section headings ka text** → `src/lib/i18n.ts` (English + Hindi ek hi file me)
+- **Rang aur design** → `tailwind.config.ts` (saffron / maroon / gold) aur `src/app/globals.css`
+- **Card artwork** → `src/components/SacredArt.tsx` (naya chinh add kar sakte hain)
+- **Temples, testimonials, FAQ** → abhi `scripts/seed.ts` me; database me seedha bhi badal sakte hain
+
+---
+
+## Copyright
+
+Poora code, design aur content **original** hai. Bhaktimay se sirf website ka *structure* aur *idea* liya gaya hai — unka text, images, logo ya code kahin use nahi hua. Mandir aur puja ke naam saarvajanik tathya hain, unme koi copyright nahi.
+
+Demo content (pujas, prices, testimonials) sirf example ke liye hai — live jaane se pehle apna asli content daal dena.
+# poojapath
