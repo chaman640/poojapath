@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-body: "Noto Sans", "Noto Sans Devanagari", system-ui, sans-serif;
+  --font-display: "Noto Serif", "Noto Serif Devanagari", Georgia, serif;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-cream text-ink antialiased;
+    background-image:
+      radial-gradient(circle at 12% 8%, rgba(212, 160, 23, 0.07), transparent 42%),
+      radial-gradient(circle at 88% 0%, rgba(234, 88, 12, 0.07), transparent 38%);
+    background-attachment: fixed;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-display font-bold tracking-tight text-maroon-800;
+    text-wrap: balance;
+  }
+
+  ::selection {
+    @apply bg-saffron-200 text-maroon-900;
+  }
+
+  :focus-visible {
+    outline: 2px solid theme("colors.saffron.600");
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  .container-x {
+    @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5
+           text-sm font-semibold transition-all duration-200 disabled:cursor-not-allowed
+           disabled:opacity-60;
+  }
+
+  .btn-primary {
+    @apply btn bg-gradient-to-r from-saffron-600 to-saffron-500 text-white
+           shadow-soft hover:from-saffron-700 hover:to-saffron-600 hover:shadow-lift
+           active:scale-[.98];
+  }
+
+  .btn-secondary {
+    @apply btn border border-maroon-700/25 bg-white/80 text-maroon-800
+           hover:border-maroon-700/50 hover:bg-white active:scale-[.98];
+  }
+
+  .btn-ghost {
+    @apply btn text-maroon-700 hover:bg-saffron-50;
+  }
+
+  .card {
+    @apply rounded-2xl border border-saffron-100 bg-white shadow-soft
+           transition-all duration-300;
+  }
+
+  .card-hover {
+    @apply hover:-translate-y-1 hover:border-saffron-200 hover:shadow-lift;
+  }
+
+  .label {
+    @apply mb-1.5 block text-sm font-semibold text-maroon-800;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-saffron-200 bg-white px-4 py-2.5 text-[15px]
+           text-ink placeholder:text-ink/35 transition
+           focus:border-saffron-500 focus:outline-none focus:ring-4 focus:ring-saffron-500/10;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-saffron-200
+           bg-saffron-50 px-3 py-1 text-xs font-semibold text-saffron-800;
+  }
+
+  .divider-gold {
+    @apply mx-auto h-px w-40 bg-gold-line;
+  }
+
+  .section-title {
+    @apply text-center text-3xl sm:text-4xl;
+  }
+
+  .section-sub {
+    @apply mx-auto mt-3 max-w-2xl text-center text-[15px] leading-relaxed text-ink/65;
+  }
+
+  .prose-devotional {
+    @apply text-[15px] leading-[1.85] text-ink/80;
+  }
+
+  .prose-devotional p {
+    @apply mb-4;
+  }
+
+  .prose-devotional h2 {
+    @apply mb-3 mt-8 text-xl;
+  }
+
+  .prose-devotional h3 {
+    @apply mb-2 mt-6 text-lg;
+  }
+
+  .prose-devotional ul {
+    @apply mb-4 list-disc space-y-1.5 pl-5;
+  }
+}
+
+/* Kalash / diya jaisi decorative cheezein screen reader se chhupi rahen */
+.decor {
+  pointer-events: none;
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #fff3e4;
+}
+::-webkit-scrollbar-thumb {
+  background: #e6b877;
+  border-radius: 9999px;
+  border: 2px solid #fff3e4;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #d4a017;
+}
