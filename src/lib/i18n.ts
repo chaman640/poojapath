@@ -360,6 +360,19 @@ export const dict = {
 
 export type Dict = (typeof dict)["en"];
 
+/**
+ * Site ka naam .env se aata hai (NEXT_PUBLIC_SITE_NAME / _HI).
+ * Isse domain ya brand badalne par code chhune ki zaroorat nahi —
+ * Navbar, Footer, page titles sab apne aap badal jate hain.
+ */
 export function getDict(lang: Lang): Dict {
-  return (lang === "hi" ? dict.hi : dict.en) as unknown as Dict;
+  const base = (lang === "hi" ? dict.hi : dict.en) as unknown as Dict;
+
+  const envName =
+    lang === "hi"
+      ? process.env.NEXT_PUBLIC_SITE_NAME_HI || process.env.NEXT_PUBLIC_SITE_NAME
+      : process.env.NEXT_PUBLIC_SITE_NAME;
+
+  if (!envName?.trim()) return base;
+  return { ...base, brand: envName.trim() } as unknown as Dict;
 }
