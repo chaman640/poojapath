@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings } from "@/db/schema";
-import { verifyWebhookSignature } from "@/lib/razorpay";
+import { verifyWebhookSignature } from "@/lib/payments/razorpay";
 import { confirmBookingPaid, markBookingFailed } from "@/lib/booking-service";
 
 export const runtime = "nodejs";
@@ -50,7 +50,7 @@ export async function POST(req: Request) {
   const [booking] = await db
     .select()
     .from(bookings)
-    .where(eq(bookings.razorpayOrderId, orderId))
+    .where(eq(bookings.providerOrderId, orderId))
     .limit(1);
 
   if (!booking) return NextResponse.json({ ok: true, ignored: true });
@@ -65,7 +65,7 @@ export async function POST(req: Request) {
       }
       await confirmBookingPaid({
         bookingId: booking.id,
-        razorpayPaymentId: payment?.id ?? null,
+        providerPaymentId: payment?.id ?? null,
       });
       break;
     }

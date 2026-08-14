@@ -3,6 +3,7 @@ import { asc, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { addons, pujaAddons } from "@/db/schema";
 import { formatINR, optimizedImage } from "@/lib/utils";
+import ConfirmSubmit from "@/components/admin/ConfirmSubmit";
 import { deleteAddonAction, toggleAddonActiveAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
@@ -128,12 +129,12 @@ export default async function AdminAddonsPage({
                   </Link>
                   <form action={deleteAddonAction}>
                     <input type="hidden" name="addonId" value={a.id} />
-                    <button
-                      type="submit"
+                    <ConfirmSubmit
+                      message={`"${a.nameEn}" delete karein?`}
                       className="text-[12.5px] font-semibold text-red-600 hover:underline"
                     >
                       Delete
-                    </button>
+                    </ConfirmSubmit>
                   </form>
                 </div>
               </div>

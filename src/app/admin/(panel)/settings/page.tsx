@@ -1,12 +1,14 @@
 import { getAdminSession } from "@/lib/auth";
-import { isPaymentLive, siteConfig, whatsappProvider } from "@/lib/env";
+import {siteConfig, whatsappProvider} from "@/lib/env";
 import PasswordForm from "./PasswordForm";
+import { activeProvider } from "@/lib/payments";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminSettingsPage() {
   const session = await getAdminSession();
   const wa = whatsappProvider();
+  const payProvider = activeProvider();
 
   const rows: Array<[string, string, boolean]> = [
     ["Site URL", siteConfig.url, siteConfig.url.startsWith("https://")],
@@ -14,9 +16,16 @@ export default async function AdminSettingsPage() {
     ["Support WhatsApp", siteConfig.whatsapp, siteConfig.whatsapp !== "+919000000000"],
     ["Support email", siteConfig.email, true],
     [
-      "Razorpay",
-      isPaymentLive() ? "Connected — live payments chalu" : "Not connected — Demo Mode",
-      isPaymentLive(),
+      "Payment gateway",
+      payProvider === "none"
+        ? "Not connected — Demo Mode"
+        : `Connected (${payProvider}) — live payments chalu`,
+      payProvider !== "none",
+    ],
+    [
+      "Business address",
+      siteConfig.address || "Set nahi hai — gateway KYC ke liye zaroori",
+      Boolean(siteConfig.address),
     ],
     [
       "WhatsApp provider",

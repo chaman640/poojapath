@@ -3,9 +3,16 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { addons, adminUsers, packages, pujaAddons, pujas } from "@/db/schema";
+import {
+  addons,
+  adminUsers,
+  bookings,
+  packages,
+  pujaAddons,
+  pujas,
+} from "@/db/schema";
 import {
   attemptLogin,
   createSessionCookie,
@@ -450,21 +457,44 @@ export async function togglePujaActiveAction(formData: FormData) {
   revalidatePath("/pujas");
 }
 
+/**
+ * Puja delete.
+ *
+ * Normal delete tabhi hoti hai jab us puja par ek bhi booking na ho —
+ * warna purani bookings ka record toot jayega. Bookings hone par saaf
+ * message dikhta hai, aur chahein to "force" se bookings samet delete
+ * kar sakte hain (admin ko dobara confirm karna padta hai).
+ */
 export async function deletePujaAction(formData: FormData) {
   const session = await getAdminSession();
   if (!session) redirect("/admin/login");
 
   const id = String(formData.get("pujaId") ?? "");
-  if (!id) return;
+  const force = String(formData.get("force") ?? "") === "true";
+  if (!id) redirect("/admin/pujas");
 
-  // Bookings wali puja delete nahi hoti (foreign key restrict) —
-  // us sthiti me use sirf inactive kar dete hain.
-  try {
-    await db.delete(pujas).where(eq(pujas.id, id));
-  } catch {
-    await db.update(pujas).set({ isActive: false }).where(eq(pujas.id, id));
+  const [row] = await db
+    .select({
+      count: sql<number>`COUNT(*)`.mapWith(Number),
+    })
+    .from(bookings)
+    .where(eq(bookings.pujaId, id));
+
+  const bookingCount = row?.count ?? 0;
+
+  if (bookingCount > 0 && !force) {
+    revalidatePath("/admin/pujas");
+    redirect(`/admin/pujas?blocked=${bookingCount}`);
   }
+
+  if (force && bookingCount > 0) {
+    // pehle bookings (aur unke add-ons/events cascade se) hatao
+    await db.delete(bookings).where(eq(bookings.pujaId, id));
+  }
+
+  await db.delete(pujas).where(eq(pujas.id, id));
 
   revalidatePath("/admin/pujas");
   revalidatePath("/pujas");
+  redirect("/admin/pujas?deleted=1");
 }

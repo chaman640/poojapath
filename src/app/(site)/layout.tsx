@@ -20,6 +20,7 @@ export default async function SiteLayout({
         phone={siteConfig.phone}
         whatsapp={siteConfig.whatsapp}
         email={siteConfig.email}
+        address={siteConfig.address}
       />
       <WhatsappFloat whatsapp={siteConfig.whatsapp} />
     </LanguageProvider>

@@ -24,6 +24,7 @@ export const dict = {
       track: "Track Booking",
       contact: "Contact",
       about: "About Us",
+      pricing: "Pricing",
     },
     cta: {
       participate: "Participate Now",
@@ -195,6 +196,7 @@ export const dict = {
       track: "बुकिंग देखें",
       contact: "संपर्क",
       about: "हमारे बारे में",
+      pricing: "मूल्य सूची",
     },
     cta: {
       participate: "अभी सहभागी बनें",

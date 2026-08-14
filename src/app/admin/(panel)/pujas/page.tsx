@@ -3,6 +3,7 @@ import { asc, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings, packages, pujas, temples } from "@/db/schema";
 import { formatDate, formatINR } from "@/lib/utils";
+import ConfirmSubmit from "@/components/admin/ConfirmSubmit";
 import { deletePujaAction, togglePujaActiveAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function AdminPujasPage({
   searchParams,
 }: {
-  searchParams: Promise<{ saved?: string }>;
+  searchParams: Promise<{ saved?: string; deleted?: string; blocked?: string }>;
 }) {
   const sp = await searchParams;
 
@@ -53,6 +54,26 @@ export default async function AdminPujasPage({
         <p className="rounded-xl border border-green-300 bg-green-50 px-4 py-3 text-[13.5px] text-green-800">
           ✓ Puja save ho gayi.
         </p>
+      )}
+
+      {sp.deleted === "1" && (
+        <p className="rounded-xl border border-green-300 bg-green-50 px-4 py-3 text-[13.5px] text-green-800">
+          ✓ Puja delete ho gayi.
+        </p>
+      )}
+
+      {sp.blocked && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-[13.5px] text-amber-900">
+          <p className="font-bold">
+            ⚠️ Ye puja delete nahi hui — ispar {sp.blocked} booking(s) hain.
+          </p>
+          <p className="mt-1 leading-relaxed">
+            Purani bookings ka record surakshit rakhne ke liye aisi puja seedha delete nahi
+            hoti. Do raaste hain — ya to puja ko <strong>Hidden</strong> kar dein (site par
+            nahi dikhegi, record bacha rahega), ya neeche <strong>“Delete + bookings”</strong>{" "}
+            se bookings samet hamesha ke liye hata dein.
+          </p>
+        </div>
       )}
 
       <div className="card overflow-hidden">
@@ -133,15 +154,28 @@ export default async function AdminPujasPage({
                         Edit
                       </Link>
                       <span className="mx-2 text-ink/20">|</span>
-                      <form action={deletePujaAction} className="inline">
-                        <input type="hidden" name="pujaId" value={p.id} />
-                        <button
-                          type="submit"
-                          className="text-[12.5px] font-semibold text-red-600 hover:underline"
-                        >
-                          Delete
-                        </button>
-                      </form>
+                      {p.bookingCount === 0 ? (
+                        <form action={deletePujaAction} className="inline">
+                          <input type="hidden" name="pujaId" value={p.id} />
+                          <ConfirmSubmit
+                            message={`"${p.titleEn}" hamesha ke liye delete karein?`}
+                            className="text-[12.5px] font-semibold text-red-600 hover:underline"
+                          >
+                            Delete
+                          </ConfirmSubmit>
+                        </form>
+                      ) : (
+                        <form action={deletePujaAction} className="inline">
+                          <input type="hidden" name="pujaId" value={p.id} />
+                          <input type="hidden" name="force" value="true" />
+                          <ConfirmSubmit
+                            message={`SAAVDHAN!\n\n"${p.titleEn}" ke saath uski ${p.bookingCount} booking(s) bhi hamesha ke liye delete ho jayengi. Ye wapas nahi aayengi.\n\nAage badhein?`}
+                            className="text-[12.5px] font-semibold text-red-600 hover:underline"
+                          >
+                            Delete + bookings
+                          </ConfirmSubmit>
+                        </form>
+                      )}
                     </td>
                   </tr>
                 ))}

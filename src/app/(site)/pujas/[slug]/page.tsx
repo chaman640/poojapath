@@ -7,8 +7,9 @@ import PujaCard from "@/components/PujaCard";
 import { getLangDict } from "@/lib/lang-server";
 import { pick, pickList } from "@/lib/i18n";
 import { formatDate, formatINR } from "@/lib/utils";
-import { isPaymentLive, siteConfig } from "@/lib/env";
+import {siteConfig} from "@/lib/env";
 import { getPujaBySlug, getUpcomingPujas } from "@/lib/queries";
+import { isPaymentLive } from "@/lib/payments";
 
 type Params = Promise<{ slug: string }>;
 

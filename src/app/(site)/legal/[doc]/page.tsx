@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getLangDict } from "@/lib/lang-server";
 import { siteConfig } from "@/lib/env";
+import BusinessDetails from "@/components/BusinessDetails";
 
 const DOCS = ["privacy", "terms", "refund", "shipping"] as const;
 type Doc = (typeof DOCS)[number];
@@ -236,9 +237,7 @@ export default async function LegalPage({ params }: { params: Params }) {
         )}
 
         <hr className="my-8 border-saffron-100" />
-        <p className="text-[13px] text-ink/55">
-          {hi ? "प्रश्न हो तो संपर्क करें" : "Questions? Reach us at"}: {siteConfig.email} • {siteConfig.phone}
-        </p>
+        <BusinessDetails lang={lang} />
       </article>
     </>
   );

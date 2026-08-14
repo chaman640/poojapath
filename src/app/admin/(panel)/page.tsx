@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { desc, eq, gte, sql } from "drizzle-orm";
 import { db } from "@/db";
+import { activeProvider } from "@/lib/payments";
 import { bookings, contactMessages, pujas } from "@/db/schema";
 import { formatDate, formatINR } from "@/lib/utils";
-import { isPaymentLive, whatsappProvider } from "@/lib/env";
+import {whatsappProvider} from "@/lib/env";
 import StatusBadge from "./StatusBadge";
 
 export const dynamic = "force-dynamic";
@@ -55,6 +56,7 @@ export default async function AdminDashboard() {
   ];
 
   const waProvider = whatsappProvider();
+  const payProvider = activeProvider();
 
   return (
     <div className="space-y-8">
@@ -65,13 +67,25 @@ export default async function AdminDashboard() {
 
       {/* Setup warnings */}
       <div className="grid gap-3 sm:grid-cols-2">
-        {!isPaymentLive() && (
+        {payProvider === "none" && (
           <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
-            <p className="text-[13px] font-bold text-amber-900">⚠️ Razorpay connect nahi hai</p>
+            <p className="text-[13px] font-bold text-amber-900">
+              ⚠️ Payment gateway connect nahi hai
+            </p>
             <p className="mt-1 text-[12.5px] leading-relaxed text-amber-800">
               Site abhi Demo Mode me hai — booking ban jati hai par paisa nahi katta.
-              Render ke Environment tab me <code>RAZORPAY_KEY_ID</code> aur{" "}
-              <code>RAZORPAY_KEY_SECRET</code> daal kar redeploy karein.
+              Render ke Environment tab me <code>PAYTM_MID</code> aur{" "}
+              <code>PAYTM_MERCHANT_KEY</code> daal kar redeploy karein.
+            </p>
+          </div>
+        )}
+        {payProvider !== "none" && (
+          <div className="rounded-2xl border border-green-300 bg-green-50 p-4">
+            <p className="text-[13px] font-bold text-green-900">
+              ✓ Payment gateway chalu hai ({payProvider})
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-green-800">
+              Bookings par asli payment liya ja raha hai.
             </p>
           </div>
         )}

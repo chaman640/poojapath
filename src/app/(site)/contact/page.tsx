@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import ContactForm from "@/components/ContactForm";
+import BusinessDetails from "@/components/BusinessDetails";
 import { getLangDict } from "@/lib/lang-server";
 import { siteConfig } from "@/lib/env";
 
@@ -83,6 +84,8 @@ export default async function ContactPage() {
                 : "9:00 AM to 9:00 PM (IST) — all seven days"}
             </p>
           </div>
+
+          <BusinessDetails lang={lang} />
         </div>
 
         <ContactForm />

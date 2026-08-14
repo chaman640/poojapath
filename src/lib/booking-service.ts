@@ -37,17 +37,17 @@ export function trackUrl(code: string) {
  */
 export async function confirmBookingPaid(params: {
   bookingId: string;
-  razorpayPaymentId?: string | null;
+  providerPaymentId?: string | null;
   demo?: boolean;
 }): Promise<{ changed: boolean }> {
-  const { bookingId, razorpayPaymentId, demo } = params;
+  const { bookingId, providerPaymentId, demo } = params;
 
   const updated = await db
     .update(bookings)
     .set({
       status: "CONFIRMED",
       paymentStatus: demo ? "DEMO_SKIPPED" : "CAPTURED",
-      razorpayPaymentId: razorpayPaymentId ?? undefined,
+      providerPaymentId: providerPaymentId ?? undefined,
       updatedAt: new Date(),
     })
     .where(

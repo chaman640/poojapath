@@ -79,8 +79,9 @@ export default async function AdminBookingDetail({
     ],
     ["Total amount", formatINR(b.amountInPaise)],
     ["Payment status", b.paymentStatus],
-    ["Razorpay order", b.razorpayOrderId ?? "—"],
-    ["Razorpay payment", b.razorpayPaymentId ?? "—"],
+    ["Gateway", b.paymentProvider === "none" ? "Demo mode" : b.paymentProvider],
+    ["Gateway order ID", b.providerOrderId ?? "—"],
+    ["Gateway txn ID", b.providerPaymentId ?? "—"],
     ["WhatsApp opt-in", b.whatsappOptIn ? "Yes" : "No"],
     ["Booked on", formatDate(b.createdAt, "en")],
   ];

@@ -18,7 +18,8 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
   Bade buttons, neeche hamesha total dikhta hai, koi login nahi
 - **Add-ons** — prasad ghar par, rudraksh mala, deepdaan, annadaan… tap karke jodo.
   "Ghar bhejne wale" add-on chunte hi pata bharna zaroori ho jata hai
-- Razorpay payment (UPI, card, netbanking)
+- **Paytm** payment (UPI, card, netbanking) — Razorpay par switch karna ho to bhi tayyar
+- Services & Pricing page (`/pricing`) — payment gateway KYC ke liye
 - Booking status page + "Track Booking" (Booking ID + number se)
 - Chadhava (offerings) aur Divine Store (products)
 - About, Contact (form ke saath), Privacy / Terms / Refund / Shipping
@@ -44,7 +45,7 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Language | TypeScript | Galtiyan likhte waqt hi pakdi jaati hain |
 | Styling | Tailwind CSS | Poora design custom, koi bhaari UI library nahi |
 | Database | **PostgreSQL** + Drizzle ORM | Reliable; saari queries parameterised (SQL injection se surakshit) |
-| Payment | **Razorpay** | India ka standard — UPI/card/netbanking |
+| Payment | **Paytm** (Razorpay bhi supported) | `.env` me ek line badal kar switch kar sakte hain |
 | Photos | **Cloudinary** | Free 25GB; photos apne aap WebP me convert hoti hain |
 | WhatsApp | AiSensy ya Interakt | `.env` me key daalte hi chalu |
 | Hosting | **Render** | Free tier, auto HTTPS, ek click deploy |
@@ -64,8 +65,8 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Brute force login | 6 galat koshish → account 30 min lock; IP par bhi rate limit |
 | Session hijack | JWT `httpOnly` + `Secure` cookie, 8 ghante me expire, `tokenVersion` se turant invalidate |
 | Admin bypass | Auth **har page aur har action me** server-side check hota hai — middleware par bharosa nahi (wo bypass ho sakta hai) |
-| Payment tampering | Amount hamesha database se, kabhi browser se nahi; Razorpay signature HMAC verify + server-to-server confirm |
-| Fake webhook | `x-razorpay-signature` HMAC verify — bina sahi signature ke reject |
+| Payment tampering | Amount hamesha database se, kabhi browser se nahi; Paytm checksum verify + Transaction Status API se server-to-server confirm |
+| Fake callback/webhook | Paytm CHECKSUMHASH aur Razorpay HMAC verify — bina sahi signature ke reject |
 | Spam bookings/messages | IP rate limiting + contact form me honeypot |
 | Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block |
 | Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` |
@@ -152,25 +153,89 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 
 ---
 
-## Razorpay chalu karna (jab account ban jaye)
+## Paytm payment gateway chalu karna
 
-1. [razorpay.com](https://razorpay.com) par account + KYC (PAN, bank account, business proof)
-2. Dashboard → **Settings → API Keys → Generate Key** — Key ID aur Secret milega
-3. Render → Environment me daalein:
-   ```
-   RAZORPAY_KEY_ID     = rzp_live_xxxxxxxx
-   RAZORPAY_KEY_SECRET = xxxxxxxxxxxxxxxx
-   ```
-4. Dashboard → **Settings → Webhooks → Add New Webhook**
-   - URL: `https://aapka-domain.com/api/payment/webhook`
-   - Secret: ek random string banayein
-   - Events: `payment.captured`, `payment.failed`, `order.paid`
-   - Wahi secret Render me `RAZORPAY_WEBHOOK_SECRET` me daalein
-5. **Redeploy** karein — bas, payment live ho gaya.
+Site **Paytm** ke liye tayyar hai. Jab tak keys nahi hain, "Demo Mode" me chalti hai —
+booking ban jati hai par paisa nahi katta.
 
-Jab tak keys khaali hain, site **Demo Mode** me chalti hai: booking ban jaati hai par paisa nahi katta. Testing ke liye pehle `rzp_test_` keys use karein.
+### 1. Paytm merchant account
 
-> KYC ke liye Razorpay website par Privacy Policy, Terms, Refund aur Shipping page maangta hai — ye chaaron page site me pehle se bane hue hain (`/legal/...`).
+[business.paytm.com](https://business.paytm.com) par account banayein aur KYC poori karein
+(PAN, bank account, business proof). Approval ke baad Dashboard →
+**Developer Settings → API Keys** me ye do milenge:
+
+- **MID** (Merchant ID)
+- **Merchant Key** (16 characters)
+
+### 2. Callback URL set karein
+
+Paytm dashboard me website/callback URL ye rakhein:
+
+```
+https://aapka-domain.com/api/payment/paytm/callback
+```
+
+### 3. Render → Environment me bharein
+
+```
+PAYMENT_PROVIDER   = paytm
+PAYTM_MID          = aapka MID
+PAYTM_MERCHANT_KEY = aapki merchant key
+PAYTM_WEBSITE      = DEFAULT          # test ke liye: WEBSTAGING
+PAYTM_ENV          = production       # pehle test karna ho to: test
+```
+
+**Redeploy** karein — payment live ho jayega.
+
+> **Pehle test karein:** `PAYTM_ENV=test` aur `PAYTM_WEBSITE=WEBSTAGING` rakh kar Paytm ki
+> staging keys se ek booking karke dekh lein. Sab theek lage to production par switch karein.
+
+### Security — Paytm ke saath kya-kya hota hai
+
+- Amount hamesha database se jata hai, browser se kabhi nahi
+- Har request par Paytm ka **checksum** (AES + SHA-256) banta aur verify hota hai
+- Payment ke baad browser jo bhi kahe, uspar bharosa nahi — hum **Paytm ke server se
+  seedha Transaction Status API** se pooch kar hi booking confirm karte hain
+- Merchant Key sirf server par rehti hai, browser tak kabhi nahi jaati
+
+### Razorpay par switch karna ho to
+
+`.env` me itna hi:
+
+```
+PAYMENT_PROVIDER    = razorpay
+RAZORPAY_KEY_ID     = ...
+RAZORPAY_KEY_SECRET = ...
+```
+
+Razorpay ka code pehle se maujood hai — kuch aur badalne ki zaroorat nahi.
+
+---
+
+## Payment gateway KYC ke liye zaroori pages
+
+Paytm/Razorpay approval ke waqt ye pages maangte hain — **sab pehle se bane hue hain**:
+
+| Page | Link |
+|---|---|
+| Privacy Policy | `/legal/privacy` |
+| Terms & Conditions | `/legal/terms` |
+| Refund & Cancellation | `/legal/refund` |
+| Shipping & Delivery | `/legal/shipping` |
+| Services & Pricing | `/pricing` |
+| Contact Us | `/contact` |
+| About Us | `/about` |
+
+Ek cheez **aapko bharni hai** — business ka naam aur pura pata. Ye Contact page,
+Legal pages aur footer me dikhta hai, aur KYC me maanga jata hai:
+
+```
+NEXT_PUBLIC_BUSINESS_NAME    = Pooja Path
+NEXT_PUBLIC_BUSINESS_ADDRESS = Makan no., Gali, Sheher, Rajya - Pincode
+NEXT_PUBLIC_GSTIN            = (agar hai to)
+```
+
+Admin → Settings me dikh jayega ki ye set hua ya nahi.
 
 ---
 
@@ -240,6 +305,7 @@ Jab tak key nahi hai, message server log me print hote hain (`[whatsapp:demo] ..
 | Puja ki photo lagana | Puja kholein → upar **Photo chunein** |
 | Naya add-on banana | Admin → Add-ons → **+ Naya add-on** |
 | Puja me add-ons lagana | Puja kholein → neeche checkbox tick karein |
+| Puja delete karna | Pujas list → **Delete**. Booking wali puja ke liye **Delete + bookings** (dobara confirm maangta hai) |
 | Puja chhupana/dikhana | Pujas list me **Live / Hidden** button |
 | Booking dekhna | Admin → Bookings (search: ID, naam, phone) |
 | Video bhejna | Booking kholein → status **Video shared** + link daalein → Update |

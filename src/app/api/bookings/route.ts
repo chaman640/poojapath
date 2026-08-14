@@ -6,8 +6,7 @@ import { bookingSchema, firstError } from "@/lib/validation";
 import { guardPublicPost, jsonError } from "@/lib/guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { generateBookingCode, hashIp, normalizePhone } from "@/lib/utils";
-import { isPaymentLive } from "@/lib/env";
-import { createOrder } from "@/lib/razorpay";
+import { activeProvider, createPaymentSession } from "@/lib/payments";
 import {
   confirmBookingPaid,
   resolveAddons,
@@ -28,11 +27,9 @@ export async function POST(req: Request) {
     blockMs: 30 * 60_000,
   });
   if (!limit.ok) {
-    return jsonError(
-      "Bahut zyada requests. Thodi der baad koshish karein.",
-      429,
-      { retryAfter: limit.retryAfterSeconds },
-    );
+    return jsonError("Bahut zyada requests. Thodi der baad koshish karein.", 429, {
+      retryAfter: limit.retryAfterSeconds,
+    });
   }
 
   let body: unknown;
@@ -51,14 +48,9 @@ export async function POST(req: Request) {
 
   // Puja + package server-side resolve — price kabhi client se nahi lete
   const resolved = await resolvePujaAndPackage(input.pujaSlug, input.packageId);
-  if (!resolved) {
-    return jsonError("Ye puja ya package ab available nahi hai.", 404);
-  }
+  if (!resolved) return jsonError("Ye puja ya package ab available nahi hai.", 404);
 
-  if (
-    resolved.seatsTotal != null &&
-    resolved.seatsBooked >= resolved.seatsTotal
-  ) {
+  if (resolved.seatsTotal != null && resolved.seatsBooked >= resolved.seatsTotal) {
     return jsonError("Is puja ki bookings poori ho chuki hain.", 409);
   }
 
@@ -73,8 +65,7 @@ export async function POST(req: Request) {
   const grandTotal = resolved.priceInPaise + addonsTotal;
 
   // Ghar bhejne wala add-on hai to pata zaroori
-  const needsAddress = chosenAddons.some((a) => a.kind === "DELIVERY");
-  if (needsAddress) {
+  if (chosenAddons.some((a) => a.kind === "DELIVERY")) {
     const missing =
       !input.addressLine?.trim() ||
       !input.city?.trim() ||
@@ -89,6 +80,7 @@ export async function POST(req: Request) {
   }
 
   const bookingCode = generateBookingCode();
+  const provider = activeProvider();
 
   const [created] = await db
     .insert(bookings)
@@ -111,6 +103,7 @@ export async function POST(req: Request) {
       amountInPaise: grandTotal,
       status: "PENDING_PAYMENT",
       paymentStatus: "NOT_STARTED",
+      paymentProvider: provider,
       whatsappOptIn: input.whatsappOptIn ?? true,
       ipHash: hashIp(ip),
     })
@@ -130,8 +123,8 @@ export async function POST(req: Request) {
     );
   }
 
-  /* ---------- Demo mode: Razorpay keys abhi set nahi hain ---------- */
-  if (!isPaymentLive()) {
+  /* ---------- Demo mode: koi gateway configure nahi hai ---------- */
+  if (provider === "none") {
     await confirmBookingPaid({ bookingId: created.id, demo: true });
     return NextResponse.json({
       ok: true,
@@ -141,21 +134,18 @@ export async function POST(req: Request) {
     });
   }
 
-  /* ---------- Live: Razorpay order banao ---------- */
+  /* ---------- Live: gateway par order/transaction banao ---------- */
   try {
-    const order = await createOrder({
+    const { session, providerOrderId } = await createPaymentSession({
+      bookingCode: created.bookingCode,
       amountInPaise: created.amountInPaise,
-      receipt: created.bookingCode,
-      notes: {
-        bookingCode: created.bookingCode,
-        puja: resolved.pujaTitleEn.slice(0, 100),
-      },
+      pujaTitle: resolved.pujaTitleEn,
     });
 
     await db
       .update(bookings)
       .set({
-        razorpayOrderId: order.orderId,
+        providerOrderId,
         paymentStatus: "CREATED",
         updatedAt: new Date(),
       })
@@ -165,16 +155,10 @@ export async function POST(req: Request) {
       ok: true,
       bookingCode: created.bookingCode,
       amountInPaise: created.amountInPaise,
-      payment: {
-        mode: "razorpay",
-        orderId: order.orderId,
-        amount: order.amount,
-        currency: order.currency,
-        keyId: order.keyId,
-      },
+      payment: session,
     });
   } catch (err) {
-    console.error("[razorpay] order create failed:", err);
+    console.error(`[${provider}] payment session failed:`, err);
     return jsonError(
       "Payment gateway se connect nahi ho paya. Thodi der baad koshish karein.",
       502,

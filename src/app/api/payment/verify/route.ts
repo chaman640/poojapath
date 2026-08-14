@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
+import { isPaymentLive } from "@/lib/payments";
 import { bookings } from "@/db/schema";
 import { verifyPaymentSchema } from "@/lib/validation";
 import { guardPublicPost, jsonError } from "@/lib/guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
-import { fetchPayment, verifyCheckoutSignature } from "@/lib/razorpay";
+import { fetchPayment, verifyCheckoutSignature } from "@/lib/payments/razorpay";
 import { confirmBookingPaid } from "@/lib/booking-service";
-import { isPaymentLive } from "@/lib/env";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,7 +49,7 @@ export async function POST(req: Request) {
   const [booking] = await db
     .select()
     .from(bookings)
-    .where(eq(bookings.razorpayOrderId, orderId))
+    .where(eq(bookings.providerOrderId, orderId))
     .limit(1);
 
   if (!booking) return jsonError("Booking nahi mili.", 404);
@@ -80,7 +81,7 @@ export async function POST(req: Request) {
     });
   }
 
-  await confirmBookingPaid({ bookingId: booking.id, razorpayPaymentId: paymentId });
+  await confirmBookingPaid({ bookingId: booking.id, providerPaymentId: paymentId });
 
   return NextResponse.json({ ok: true, bookingCode: booking.bookingCode });
 }

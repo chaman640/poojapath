@@ -34,17 +34,26 @@ export type WizardAddon = {
   kind: "DELIVERY" | "SERVICE";
 };
 
+type PaytmCheckout = {
+  onLoad: (cb: () => void) => void;
+  init: (config: Record<string, unknown>) => Promise<void>;
+  invoke: () => void;
+};
+
 declare global {
   interface Window {
     Razorpay?: new (options: Record<string, unknown>) => { open: () => void };
+    Paytm?: { CheckoutJS?: PaytmCheckout };
   }
 }
 
-function loadRazorpay(): Promise<boolean> {
+function loadScript(src: string, id?: string): Promise<boolean> {
   return new Promise((resolve) => {
-    if (window.Razorpay) return resolve(true);
+    if (id && document.getElementById(id)) return resolve(true);
     const s = document.createElement("script");
-    s.src = "https://checkout.razorpay.com/v1/checkout.js";
+    s.src = src;
+    if (id) s.id = id;
+    s.crossOrigin = "anonymous";
     s.onload = () => resolve(true);
     s.onerror = () => resolve(false);
     document.body.appendChild(s);
@@ -241,12 +250,69 @@ export default function BookingWizard({
         return;
       }
 
+      /* ---------------- Demo mode ---------------- */
       if (data.payment?.mode === "demo") {
         router.push(`/booking/${data.bookingCode}`);
         return;
       }
 
-      const ready = await loadRazorpay();
+      /* ---------------- Paytm ---------------- */
+      if (data.payment?.mode === "paytm") {
+        const ok = await loadScript(data.payment.scriptUrl, "paytm-checkout-js");
+        if (!ok || !window.Paytm?.CheckoutJS) {
+          setError(
+            lang === "hi"
+              ? "भुगतान विंडो नहीं खुली। इंटरनेट जाँच कर दोबारा कोशिश करें।"
+              : "Payment window did not open. Check your internet and try again.",
+          );
+          setBusy(false);
+          return;
+        }
+
+        const checkout = window.Paytm.CheckoutJS;
+        checkout.onLoad(() => {
+          checkout
+            .init({
+              root: "",
+              flow: "DEFAULT",
+              data: {
+                orderId: data.payment.orderId,
+                token: data.payment.txnToken,
+                tokenType: "TXN_TOKEN",
+                amount: data.payment.amount,
+              },
+              merchant: { mid: data.payment.mid, redirect: true },
+              handler: {
+                notifyMerchant: (eventName: string) => {
+                  if (eventName === "APP_CLOSED" || eventName === "SESSION_EXPIRED") {
+                    setBusy(false);
+                    setError(
+                      lang === "hi"
+                        ? "भुगतान रद्द हुआ। आपकी बुकिंग सुरक्षित है — दोबारा प्रयास करें।"
+                        : "Payment cancelled. Your booking is saved — you can try again.",
+                    );
+                  }
+                },
+              },
+            })
+            .then(() => checkout.invoke())
+            .catch(() => {
+              setBusy(false);
+              setError(
+                lang === "hi"
+                  ? "भुगतान शुरू नहीं हो सका। दोबारा कोशिश करें।"
+                  : "Could not start the payment. Please try again.",
+              );
+            });
+        });
+        return;
+      }
+
+      /* ---------------- Razorpay ---------------- */
+      const ready = await loadScript(
+        "https://checkout.razorpay.com/v1/checkout.js",
+        "razorpay-checkout-js",
+      );
       if (!ready || !window.Razorpay) {
         setError(
           lang === "hi"

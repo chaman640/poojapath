@@ -307,8 +307,12 @@ export const bookings = pgTable(
       .notNull()
       .default("NOT_STARTED"),
 
-    razorpayOrderId: varchar("razorpay_order_id", { length: 80 }),
-    razorpayPaymentId: varchar("razorpay_payment_id", { length: 80 }),
+    // "paytm" | "razorpay" | "none" (demo)
+    paymentProvider: varchar("payment_provider", { length: 20 })
+      .notNull()
+      .default("none"),
+    providerOrderId: varchar("provider_order_id", { length: 120 }),
+    providerPaymentId: varchar("provider_payment_id", { length: 120 }),
 
     videoUrl: text("video_url"),
     prasadTracking: varchar("prasad_tracking", { length: 120 }),
@@ -321,7 +325,7 @@ export const bookings = pgTable(
   },
   (t) => [
     uniqueIndex("bookings_code_key").on(t.bookingCode),
-    uniqueIndex("bookings_rzp_order_key").on(t.razorpayOrderId),
+    uniqueIndex("bookings_provider_order_key").on(t.providerOrderId),
     index("bookings_phone_idx").on(t.phone),
     index("bookings_status_idx").on(t.status),
     index("bookings_created_idx").on(t.createdAt),

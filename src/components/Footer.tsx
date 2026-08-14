@@ -7,9 +7,10 @@ type Props = {
   phone: string;
   whatsapp: string;
   email: string;
+  address?: string;
 };
 
-export default function Footer({ phone, whatsapp, email }: Props) {
+export default function Footer({ phone, whatsapp, email, address }: Props) {
   const { t } = useLang();
   const year = new Date().getFullYear();
   const waLink = `https://wa.me/${whatsapp.replace(/\D/g, "")}`;
@@ -54,6 +55,7 @@ export default function Footer({ phone, whatsapp, email }: Props) {
               { href: "/offerings", label: t.nav.offerings },
               { href: "/products", label: t.nav.products },
               { href: "/track", label: t.nav.track },
+              { href: "/pricing", label: t.nav.pricing },
               { href: "/about", label: t.nav.about },
               { href: "/contact", label: t.nav.contact },
             ].map((l) => (
@@ -110,6 +112,11 @@ export default function Footer({ phone, whatsapp, email }: Props) {
             <li className="pt-2 text-xs leading-relaxed text-saffron-100/60">
               Support: 9 AM – 9 PM (IST), saatoṁ din
             </li>
+            {address && (
+              <li className="pt-2 text-xs leading-relaxed text-saffron-100/60">
+                {address}
+              </li>
+            )}
           </ul>
         </div>
       </div>

@@ -9,15 +9,11 @@ export const siteConfig = {
   phone: process.env.NEXT_PUBLIC_SUPPORT_PHONE || "+919000000000",
   whatsapp: process.env.NEXT_PUBLIC_SUPPORT_WHATSAPP || "+919000000000",
   email: process.env.NEXT_PUBLIC_SUPPORT_EMAIL || "support@poojapath.in",
+  /** Payment gateway KYC ke liye zaroori — legal aur contact page par dikhta hai */
+  legalName: process.env.NEXT_PUBLIC_BUSINESS_NAME || "Pooja Path",
+  address: process.env.NEXT_PUBLIC_BUSINESS_ADDRESS || "",
+  gstin: process.env.NEXT_PUBLIC_GSTIN || "",
 };
-
-/** Razorpay keys .env me hain ya nahi */
-export function isPaymentLive(): boolean {
-  return Boolean(
-    process.env.RAZORPAY_KEY_ID?.trim() &&
-      process.env.RAZORPAY_KEY_SECRET?.trim(),
-  );
-}
 
 /** WhatsApp provider configure hua hai ya nahi */
 export function whatsappProvider(): "aisensy" | "interakt" | "none" {
