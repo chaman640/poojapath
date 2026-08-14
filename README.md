@@ -12,8 +12,12 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 
 - Homepage — hero, trust bar, aane wali pujaayein, "kaise kaam karta hai", chadhava, testimonials, FAQ
 - Upcoming Pujas — search + category filter
-- Puja detail page — laabh, vidhi, mandir ki jaankari, packages, booking form
-- Booking — bina login, sirf naam/gotra/number (+ optional pata prasad ke liye)
+- Puja detail page — asli photo, laabh, vidhi, mandir ki jaankari
+- **Step-by-step booking wizard** (mobile-first) — 4 aasan steps:
+  1. Kitne logon ka → 2. Kuch extra chahiye (add-ons) → 3. Naam, gotra, number → 4. Pata + payment
+  Bade buttons, neeche hamesha total dikhta hai, koi login nahi
+- **Add-ons** — prasad ghar par, rudraksh mala, deepdaan, annadaan… tap karke jodo.
+  "Ghar bhejne wale" add-on chunte hi pata bharna zaroori ho jata hai
 - Razorpay payment (UPI, card, netbanking)
 - Booking status page + "Track Booking" (Booking ID + number se)
 - Chadhava (offerings) aur Divine Store (products)
@@ -24,8 +28,9 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 
 - Secure login (bcrypt + JWT cookie + account lockout)
 - Dashboard — bookings, revenue, pending payments
-- Bookings — search, filter, status update, video link, prasad tracking
-- Puja add/edit — dono bhasha me, packages aur pricing ke saath
+- Bookings — search, filter, status update, video link, prasad tracking, add-ons ki list
+- Puja add/edit — **photo upload**, dono bhasha me content, packages, aur kaunse add-ons dikhein
+- **Add-ons manager** — naam, photo, price, description aur prakaar (ghar bhejna / mandir seva)
 - Contact messages
 - Settings — environment status + password change
 
@@ -40,6 +45,7 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Styling | Tailwind CSS | Poora design custom, koi bhaari UI library nahi |
 | Database | **PostgreSQL** + Drizzle ORM | Reliable; saari queries parameterised (SQL injection se surakshit) |
 | Payment | **Razorpay** | India ka standard — UPI/card/netbanking |
+| Photos | **Cloudinary** | Free 25GB; photos apne aap WebP me convert hoti hain |
 | WhatsApp | AiSensy ya Interakt | `.env` me key daalte hi chalu |
 | Hosting | **Render** | Free tier, auto HTTPS, ek click deploy |
 
@@ -168,6 +174,45 @@ Jab tak keys khaali hain, site **Demo Mode** me chalti hai: booking ban jaati ha
 
 ---
 
+## Photo upload (Cloudinary)
+
+Render ki disk par photos nahi rakh sakte — har deploy par mit jaati hain. Isliye photos
+Cloudinary par jaati hain (free 25 GB).
+
+Render → Environment me ye teen daal dein (Cloudinary dashboard se):
+
+```
+CLOUDINARY_CLOUD_NAME = drbsogdpu
+CLOUDINARY_API_KEY    = 3566xxxxxxxxxxx
+CLOUDINARY_API_SECRET = rFp3xxxxxxxxxxxxxxxx
+```
+
+Bas — ab Admin → Pujas / Add-ons me “Photo chunein” dabakar seedha upload kar sakte hain.
+API secret sirf server par rehta hai, browser tak kabhi nahi jaata.
+
+Photo na daalein to site apne aap sundar SVG artwork dikha degi — kuch toota hua nahi lagega.
+Agar kabhi Cloudinary use na karna ho to “Ya link paste karein” se koi bhi https photo link
+daal sakte hain.
+
+---
+
+## Add-ons kaise kaam karte hain
+
+1. **Admin → Add-ons → + Naya add-on** — naam (Hindi+English), photo, keemat, description
+2. **Prakaar chunein:**
+   - 📦 **Ghar bhejna hai** — prasad, mala, yantra. User ye chunta hai to booking me
+     **pata bharna zaroori** ho jata hai (pincode ke saath)
+   - 🛕 **Mandir me hi seva** — deepdaan, annadaan, gau seva. Pata nahi maanga jata
+3. **Admin → Pujas → koi puja kholein** — neeche “Is puja me kaunse add-ons dikhein”
+   me tick kar dein
+4. User ko booking ke **step 2** par ye dikhenge — tap karke jodte hain, total apne aap
+   badh jata hai
+
+Add-on ka daam badalne par purani bookings ka record nahi badalta — usme wahi price
+save rehti hai jo booking ke waqt thi.
+
+---
+
 ## WhatsApp updates chalu karna
 
 **AiSensy** (`aisensy.com`) ya **Interakt** (`interakt.ai`) — dono me se koi ek. Dono par WhatsApp Business API account chahiye (~₹999/month se).
@@ -192,6 +237,9 @@ Jab tak key nahi hai, message server log me print hote hain (`[whatsapp:demo] ..
 | Kaam | Kahan |
 |---|---|
 | Nayi puja daalna | Admin → Pujas → **+ Nayi puja add karein** |
+| Puja ki photo lagana | Puja kholein → upar **Photo chunein** |
+| Naya add-on banana | Admin → Add-ons → **+ Naya add-on** |
+| Puja me add-ons lagana | Puja kholein → neeche checkbox tick karein |
 | Puja chhupana/dikhana | Pujas list me **Live / Hidden** button |
 | Booking dekhna | Admin → Bookings (search: ID, naam, phone) |
 | Video bhejna | Booking kholein → status **Video shared** + link daalein → Update |
@@ -256,4 +304,3 @@ pooja-path/
 Poora code, design aur content **original** hai. Bhaktimay se sirf website ka *structure* aur *idea* liya gaya hai — unka text, images, logo ya code kahin use nahi hua. Mandir aur puja ke naam saarvajanik tathya hain, unme koi copyright nahi.
 
 Demo content (pujas, prices, testimonials) sirf example ke liye hai — live jaane se pehle apna asli content daal dena.
-# poojapath

@@ -81,6 +81,21 @@ export function normalizePhone(raw: string): string | null {
   return null;
 }
 
+/**
+ * Cloudinary URL me transformation daal kar chhoti/optimised image laata hai.
+ * Photos apne aap WebP/AVIF ban jaati hain — site mobile par tez chalti hai.
+ */
+export function optimizedImage(
+  url: string | null | undefined,
+  width = 800,
+): string | null {
+  if (!url) return null;
+  if (!url.includes("res.cloudinary.com") || !url.includes("/upload/")) {
+    return url;
+  }
+  return url.replace("/upload/", `/upload/f_auto,q_auto,c_fill,g_auto,w_${width}/`);
+}
+
 export function maskPhone(phone: string): string {
   if (phone.length < 6) return "••••";
   return phone.slice(0, 3) + "••••" + phone.slice(-3);

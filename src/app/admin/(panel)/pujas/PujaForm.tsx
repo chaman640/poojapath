@@ -5,6 +5,17 @@ import { useFormStatus } from "react-dom";
 import Link from "next/link";
 import { savePujaAction, type ActionState } from "../../actions";
 import { ART_KEYS } from "@/components/SacredArt";
+import ImageUploader from "@/components/admin/ImageUploader";
+import { formatINR, optimizedImage } from "@/lib/utils";
+
+export type AddonOption = {
+  id: string;
+  nameEn: string;
+  nameHi: string;
+  priceInPaise: number;
+  imageUrl: string | null;
+  kind: "DELIVERY" | "SERVICE";
+};
 
 export type PkgInput = {
   id?: string;
@@ -32,6 +43,8 @@ export type PujaFormValues = {
   ritualsEn: string;
   ritualsHi: string;
   artKey: string;
+  imageUrl: string;
+  addonIds: string[];
   pujaDate: string;
   templeId: string;
   categoryId: string;
@@ -84,15 +97,18 @@ export default function PujaForm({
   initial,
   temples,
   categories,
+  allAddons,
 }: {
   initial: PujaFormValues;
   temples: Array<{ id: string; nameEn: string; cityEn: string }>;
   categories: Array<{ id: string; nameEn: string }>;
+  allAddons: AddonOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(savePujaAction, {});
   const [pkgs, setPkgs] = useState<PkgInput[]>(
     initial.packages.length ? initial.packages : [{ ...EMPTY_PKG, nameEn: "Individual", nameHi: "एकल" }],
   );
+  const [pickedAddons, setPickedAddons] = useState<string[]>(initial.addonIds);
 
   const isEdit = Boolean(initial.id);
 
@@ -110,6 +126,22 @@ export default function PujaForm({
       )}
 
       {/* ---------------- Basic ---------------- */}
+      {/* ---------------- Photo ---------------- */}
+      <section className="card p-5 sm:p-6">
+        <h2 className="text-lg">Puja ki photo</h2>
+        <p className="mt-1 text-[12.5px] text-ink/50">
+          Mandir ya puja ki asli photo daalein — card aur puja page dono par dikhegi.
+        </p>
+        <div className="mt-4 max-w-md">
+          <ImageUploader
+            name="imageUrl"
+            initialUrl={initial.imageUrl}
+            folder="pujas"
+            label=""
+          />
+        </div>
+      </section>
+
       <section className="card p-5 sm:p-6">
         <h2 className="text-lg">Basic details</h2>
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
@@ -359,6 +391,87 @@ export default function PujaForm({
             </div>
           ))}
         </div>
+      </section>
+
+      {/* ---------------- Add-ons ---------------- */}
+      <section className="card p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg">Is puja me kaunse add-ons dikhein</h2>
+            <p className="mt-1 text-[12.5px] text-ink/50">
+              Booking ke waqt user inhe jod sakega. Tick karke chunein.
+            </p>
+          </div>
+          <Link href="/admin/addons/new" target="_blank" className="btn-secondary px-4 py-2 text-[13px]">
+            + Naya add-on banayein
+          </Link>
+        </div>
+
+        {allAddons.length === 0 ? (
+          <p className="mt-5 rounded-xl border border-dashed border-saffron-200 bg-saffron-50/50 p-5 text-center text-[13.5px] text-ink/55">
+            Abhi koi add-on nahi bana. Pehle{" "}
+            <Link href="/admin/addons/new" className="font-semibold text-saffron-700 underline">
+              Add-ons
+            </Link>{" "}
+            me jaakar banayein — jaise “Prasad ghar par”, “Rudraksh mala”.
+          </p>
+        ) : (
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            {allAddons.map((a) => {
+              const checked = pickedAddons.includes(a.id);
+              return (
+                <label
+                  key={a.id}
+                  className={`flex cursor-pointer items-center gap-3 rounded-2xl border-2 p-3 transition ${
+                    checked
+                      ? "border-saffron-600 bg-saffron-50"
+                      : "border-saffron-100 bg-white hover:border-saffron-300"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    name="addonIds"
+                    value={a.id}
+                    checked={checked}
+                    onChange={(e) =>
+                      setPickedAddons((prev) =>
+                        e.target.checked
+                          ? [...prev, a.id]
+                          : prev.filter((id) => id !== a.id),
+                      )
+                    }
+                    className="h-5 w-5 shrink-0 accent-saffron-600"
+                  />
+
+                  <span className="h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-saffron-100">
+                    {a.imageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={optimizedImage(a.imageUrl, 120) ?? ""}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <span className="grid h-full w-full place-items-center text-lg">
+                        {a.kind === "DELIVERY" ? "📦" : "🛕"}
+                      </span>
+                    )}
+                  </span>
+
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13.5px] font-bold text-maroon-800">
+                      {a.nameEn}
+                    </span>
+                    <span className="block text-[12px] text-ink/55">
+                      {formatINR(a.priceInPaise)} •{" "}
+                      {a.kind === "DELIVERY" ? "ghar bhejna" : "mandir seva"}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <div className="flex flex-wrap items-center gap-3">

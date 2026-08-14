@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/admin", label: "Dashboard", exact: true },
   { href: "/admin/bookings", label: "Bookings" },
   { href: "/admin/pujas", label: "Pujas" },
+  { href: "/admin/addons", label: "Add-ons" },
   { href: "/admin/messages", label: "Messages" },
   { href: "/admin/settings", label: "Settings" },
 ];

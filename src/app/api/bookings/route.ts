@@ -1,14 +1,18 @@
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { bookings } from "@/db/schema";
+import { bookingAddons, bookings } from "@/db/schema";
 import { bookingSchema, firstError } from "@/lib/validation";
 import { guardPublicPost, jsonError } from "@/lib/guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { generateBookingCode, hashIp, normalizePhone } from "@/lib/utils";
 import { isPaymentLive } from "@/lib/env";
 import { createOrder } from "@/lib/razorpay";
-import { confirmBookingPaid, resolvePujaAndPackage } from "@/lib/booking-service";
+import {
+  confirmBookingPaid,
+  resolveAddons,
+  resolvePujaAndPackage,
+} from "@/lib/booking-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +67,27 @@ export async function POST(req: Request) {
     .filter(Boolean)
     .slice(0, Math.max(resolved.maxMembers - 1, 0));
 
+  // Add-ons ka daam bhi server par hi jodte hain
+  const chosenAddons = await resolveAddons(resolved.pujaId, input.addonIds ?? []);
+  const addonsTotal = chosenAddons.reduce((sum, a) => sum + a.priceInPaise, 0);
+  const grandTotal = resolved.priceInPaise + addonsTotal;
+
+  // Ghar bhejne wala add-on hai to pata zaroori
+  const needsAddress = chosenAddons.some((a) => a.kind === "DELIVERY");
+  if (needsAddress) {
+    const missing =
+      !input.addressLine?.trim() ||
+      !input.city?.trim() ||
+      !input.state?.trim() ||
+      !/^\d{6}$/.test(input.pincode?.trim() ?? "");
+    if (missing) {
+      return jsonError(
+        "Ghar bhejne wale saamaan ke liye poora pata aur 6 digit ka pincode bharna zaroori hai.",
+        400,
+      );
+    }
+  }
+
   const bookingCode = generateBookingCode();
 
   const [created] = await db
@@ -81,13 +106,29 @@ export async function POST(req: Request) {
       city: input.city?.trim() || null,
       state: input.state?.trim() || null,
       pincode: input.pincode?.trim() || null,
-      amountInPaise: resolved.priceInPaise,
+      packageAmountInPaise: resolved.priceInPaise,
+      addonsAmountInPaise: addonsTotal,
+      amountInPaise: grandTotal,
       status: "PENDING_PAYMENT",
       paymentStatus: "NOT_STARTED",
       whatsappOptIn: input.whatsappOptIn ?? true,
       ipHash: hashIp(ip),
     })
     .returning();
+
+  if (chosenAddons.length > 0) {
+    await db.insert(bookingAddons).values(
+      chosenAddons.map((a) => ({
+        bookingId: created.id,
+        addonId: a.id,
+        nameEn: a.nameEn,
+        nameHi: a.nameHi,
+        priceInPaise: a.priceInPaise,
+        quantity: 1,
+        kind: a.kind,
+      })),
+    );
+  }
 
   /* ---------- Demo mode: Razorpay keys abhi set nahi hain ---------- */
   if (!isPaymentLive()) {

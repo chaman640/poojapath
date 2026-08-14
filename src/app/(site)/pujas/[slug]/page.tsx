@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import SacredArt from "@/components/SacredArt";
-import BookingForm from "@/components/BookingForm";
+import PujaImage from "@/components/PujaImage";
+import BookingWizard from "@/components/BookingWizard";
 import PujaCard from "@/components/PujaCard";
 import { getLangDict } from "@/lib/lang-server";
 import { pick, pickList } from "@/lib/i18n";
@@ -35,7 +35,7 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
   const data = await getPujaBySlug(slug);
   if (!data) notFound();
 
-  const { puja, temple, category, packages } = data;
+  const { puja, temple, category, packages, addons } = data;
   const related = (await getUpcomingPujas({ limit: 4 })).filter((p) => p.slug !== slug).slice(0, 3);
 
   const title = pick(lang, puja.titleEn, puja.titleHi);
@@ -90,9 +90,22 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
 
       {/* ---------------- Hero ---------------- */}
       <section className="relative overflow-hidden bg-temple-gradient text-saffron-50">
-        <div className="container-x grid gap-8 py-12 lg:grid-cols-[1.25fr_1fr] lg:py-16">
-          <div>
-            <nav className="mb-4 flex flex-wrap items-center gap-1.5 text-xs text-saffron-100/65">
+        <div className="container-x grid gap-6 py-6 lg:grid-cols-[1.25fr_1fr] lg:items-center lg:gap-8 lg:py-16">
+          {/* Photo — mobile par sabse upar, chhoti */}
+          <div className="order-1 lg:order-2">
+            <PujaImage
+              imageUrl={puja.imageUrl}
+              artKey={puja.artKey}
+              alt={title}
+              width={900}
+              priority
+              rounded="rounded-2xl lg:rounded-3xl"
+              className="aspect-[16/9] w-full shadow-lift ring-1 ring-gold-300/25 lg:aspect-[4/3]"
+            />
+          </div>
+
+          <div className="order-2 lg:order-1">
+            <nav className="mb-3 flex flex-wrap items-center gap-1.5 text-[11px] text-saffron-100/60">
               <Link href="/" className="hover:text-gold-200">{t.nav.home}</Link>
               <span>/</span>
               <Link href="/pujas" className="hover:text-gold-200">{t.nav.pujas}</Link>
@@ -104,67 +117,74 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
               )}
             </nav>
 
-            <h1 className="font-display text-3xl leading-tight text-gold-100 sm:text-4xl">
+            <h1 className="font-display text-[26px] leading-tight text-gold-100 sm:text-4xl">
               {title}
             </h1>
             {subtitle && (
-              <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-saffron-100/85">
+              <p className="mt-2.5 max-w-2xl text-[14px] leading-relaxed text-saffron-100/85 sm:text-[15px]">
                 {subtitle}
               </p>
             )}
 
-            <dl className="mt-7 grid gap-4 sm:grid-cols-3">
-              <div className="rounded-2xl border border-gold-300/20 bg-white/[0.07] px-4 py-3">
-                <dt className="text-[11px] font-bold uppercase tracking-wide text-gold-200/80">
-                  {t.common.date}
-                </dt>
-                <dd className="mt-1 text-sm font-semibold text-saffron-50">
-                  {formatDate(puja.pujaDate, lang)}
-                </dd>
-              </div>
+            {/* Compact info chips — mobile par jagah bachati hain */}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-gold-300/25 bg-white/[0.08] px-3 py-1.5 text-[12.5px] font-semibold text-saffron-50">
+                📅 {formatDate(puja.pujaDate, lang)}
+              </span>
               {templeName && (
-                <div className="rounded-2xl border border-gold-300/20 bg-white/[0.07] px-4 py-3 sm:col-span-2">
-                  <dt className="text-[11px] font-bold uppercase tracking-wide text-gold-200/80">
-                    {t.common.temple}
-                  </dt>
-                  <dd className="mt-1 text-sm font-semibold text-saffron-50">
-                    {templeName}
-                    {templeCity && ` — ${templeCity}, ${templeState}`}
-                  </dd>
-                </div>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-gold-300/25 bg-white/[0.08] px-3 py-1.5 text-[12.5px] font-semibold text-saffron-50">
+                  🛕 {templeName}
+                  {templeCity && `, ${templeCity}`}
+                </span>
               )}
-            </dl>
+              {seatsLeft !== null && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-gold-500/20 px-3 py-1.5 text-[12.5px] font-bold text-gold-100 ring-1 ring-gold-300/30">
+                  {seatsLeft > 0 ? `🔥 ${seatsLeft} ${t.common.seatsLeft}` : t.common.soldOut}
+                </span>
+              )}
+            </div>
 
-            <div className="mt-7 flex flex-wrap items-center gap-4">
+            <div className="mt-5 flex flex-wrap items-center gap-3">
               <p className="font-display text-2xl font-bold text-gold-200">
                 {t.common.from} {formatINR(minPrice)}
               </p>
-              {seatsLeft !== null && (
-                <span className="rounded-full bg-gold-500/20 px-3 py-1 text-xs font-bold text-gold-100 ring-1 ring-gold-300/30">
-                  {seatsLeft > 0
-                    ? `${seatsLeft} ${t.common.seatsLeft}`
-                    : t.common.soldOut}
-                </span>
-              )}
-              <a href="#booking" className="btn rounded-full bg-gold-500 px-6 py-2.5 font-bold text-maroon-900 hover:bg-gold-400">
-                {t.cta.participate}
+              <a
+                href="#booking"
+                className="btn min-h-[46px] rounded-full bg-gold-500 px-6 text-[15px] font-bold text-maroon-900 hover:bg-gold-400 lg:hidden"
+              >
+                {t.cta.participate} ↓
               </a>
             </div>
-          </div>
-
-          <div className="relative">
-            <SacredArt
-              artKey={puja.artKey}
-              rounded="rounded-3xl"
-              className="aspect-[4/3] w-full shadow-lift ring-1 ring-gold-300/25"
-            />
           </div>
         </div>
       </section>
 
       {/* ---------------- Body ---------------- */}
-      <div className="container-x grid gap-10 py-12 lg:grid-cols-[1fr_minmax(0,420px)] lg:items-start">
-        <article className="space-y-10">
+      <div className="container-x grid gap-8 py-8 lg:grid-cols-[1fr_minmax(0,430px)] lg:items-start lg:gap-10 lg:py-12">
+        {/* Mobile par booking sabse pehle — user ko scroll na karna pade */}
+        <aside id="booking" className="order-1 lg:order-2 lg:sticky lg:top-24">
+          <div className="card p-5 sm:p-6">
+            <BookingWizard
+              pujaSlug={puja.slug}
+              pujaTitle={title}
+              paymentLive={isPaymentLive()}
+              addons={addons}
+              packages={packages.map((p) => ({
+                id: p.id,
+                nameEn: p.nameEn,
+                nameHi: p.nameHi,
+                priceInPaise: p.priceInPaise,
+                mrpInPaise: p.mrpInPaise,
+                maxMembers: p.maxMembers,
+                featuresEn: p.featuresEn,
+                featuresHi: p.featuresHi,
+                isPopular: p.isPopular,
+              }))}
+            />
+          </div>
+        </aside>
+
+        <article className="order-2 space-y-10 lg:order-1">
           {description && (
             <section>
               <h2 className="text-xl">{lang === "hi" ? "पूजा के बारे में" : "About this Puja"}</h2>
@@ -244,28 +264,6 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
             </ul>
           </section>
         </article>
-
-        {/* ---------------- Booking sidebar ---------------- */}
-        <aside id="booking" className="lg:sticky lg:top-24">
-          <div className="card p-5 sm:p-6">
-            <BookingForm
-              pujaSlug={puja.slug}
-              pujaTitle={title}
-              paymentLive={isPaymentLive()}
-              packages={packages.map((p) => ({
-                id: p.id,
-                nameEn: p.nameEn,
-                nameHi: p.nameHi,
-                priceInPaise: p.priceInPaise,
-                mrpInPaise: p.mrpInPaise,
-                maxMembers: p.maxMembers,
-                featuresEn: p.featuresEn,
-                featuresHi: p.featuresHi,
-                isPopular: p.isPopular,
-              }))}
-            />
-          </div>
-        </aside>
       </div>
 
       {/* ---------------- Related ---------------- */}

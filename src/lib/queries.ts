@@ -2,6 +2,8 @@ import "server-only";
 import { and, asc, desc, eq, gte, ilike, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  addons,
+  bookingAddons,
   bookingEvents,
   bookings,
   categories,
@@ -9,6 +11,7 @@ import {
   offerings,
   packages,
   products,
+  pujaAddons,
   pujas,
   temples,
   testimonials,
@@ -55,6 +58,7 @@ export async function getUpcomingPujas(opts?: {
       subtitleEn: pujas.subtitleEn,
       subtitleHi: pujas.subtitleHi,
       artKey: pujas.artKey,
+      imageUrl: pujas.imageUrl,
       pujaDate: pujas.pujaDate,
       isFeatured: pujas.isFeatured,
       seatsTotal: pujas.seatsTotal,
@@ -98,13 +102,39 @@ export async function getPujaBySlug(slug: string) {
 
   if (!puja) return null;
 
-  const pkgs = await db
-    .select()
-    .from(packages)
-    .where(and(eq(packages.pujaId, puja.puja.id), eq(packages.isActive, true)))
-    .orderBy(asc(packages.order), asc(packages.priceInPaise));
+  const [pkgs, addonList] = await Promise.all([
+    db
+      .select()
+      .from(packages)
+      .where(and(eq(packages.pujaId, puja.puja.id), eq(packages.isActive, true)))
+      .orderBy(asc(packages.order), asc(packages.priceInPaise)),
+    db
+      .select({
+        id: addons.id,
+        nameEn: addons.nameEn,
+        nameHi: addons.nameHi,
+        descEn: addons.descEn,
+        descHi: addons.descHi,
+        priceInPaise: addons.priceInPaise,
+        imageUrl: addons.imageUrl,
+        artKey: addons.artKey,
+        kind: addons.kind,
+      })
+      .from(pujaAddons)
+      .innerJoin(addons, eq(pujaAddons.addonId, addons.id))
+      .where(and(eq(pujaAddons.pujaId, puja.puja.id), eq(addons.isActive, true)))
+      .orderBy(asc(pujaAddons.order), asc(addons.order)),
+  ]);
 
-  return { ...puja, packages: pkgs };
+  return { ...puja, packages: pkgs, addons: addonList };
+}
+
+/** Booking ke saath chune gaye add-ons */
+export async function getBookingAddons(bookingId: string) {
+  return db
+    .select()
+    .from(bookingAddons)
+    .where(eq(bookingAddons.bookingId, bookingId));
 }
 
 export async function getCategoriesWithCount() {
@@ -184,6 +214,7 @@ export async function getBookingForTracking(bookingCode: string, phone: string) 
         titleEn: pujas.titleEn,
         titleHi: pujas.titleHi,
         artKey: pujas.artKey,
+        imageUrl: pujas.imageUrl,
         pujaDate: pujas.pujaDate,
       },
       pkg: {
@@ -226,6 +257,7 @@ export async function getBookingByCode(bookingCode: string) {
         titleEn: pujas.titleEn,
         titleHi: pujas.titleHi,
         artKey: pujas.artKey,
+        imageUrl: pujas.imageUrl,
         pujaDate: pujas.pujaDate,
       },
       pkg: { nameEn: packages.nameEn, nameHi: packages.nameHi },

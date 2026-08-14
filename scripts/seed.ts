@@ -12,12 +12,14 @@ import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { db, pool } from "../src/db";
 import {
+  addons,
   adminUsers,
   categories,
   faqs,
   offerings,
   packages,
   products,
+  pujaAddons,
   pujas,
   temples,
   testimonials,
@@ -424,6 +426,79 @@ const PRODUCTS = [
   { slug: "gomti-chakra-set", nameEn: "Gomti Chakra Set (11 pcs)", nameHi: "गोमती चक्र सेट (11 नग)", descEn: "Eleven natural Gomti chakras, used in Laxmi sadhana and vastu upay.", descHi: "ग्यारह प्राकृतिक गोमती चक्र, लक्ष्मी साधना एवं वास्तु उपाय हेतु।", priceInPaise: 45100, mrpInPaise: 69900, artKey: "shankh", groupEn: "Vastu & Upay", groupHi: "वास्तु एवं उपाय", order: 8 },
 ];
 
+/* ------------------------------------------------------------------ */
+/*  Add-ons — booking ke waqt user inhe jod sakta hai                   */
+/* ------------------------------------------------------------------ */
+
+const ADDONS = [
+  {
+    slug: "prasad-ghar-par",
+    nameEn: "Temple Prasad at Home",
+    nameHi: "मंदिर का प्रसाद घर पर",
+    descEn: "Sealed prasad packet from the temple, couriered to your address in 7-10 days.",
+    descHi: "मंदिर से सील बंद प्रसाद पैकेट, 7-10 दिन में आपके पते पर।",
+    priceInPaise: 25100,
+    artKey: "kalash",
+    kind: "DELIVERY" as const,
+    order: 1,
+  },
+  {
+    slug: "rudraksh-mala",
+    nameEn: "Energised Rudraksh Mala",
+    nameHi: "अभिमंत्रित रुद्राक्ष माला",
+    descEn: "5-mukhi rudraksh mala, energised in the same puja and sent with your prasad.",
+    descHi: "5 मुखी रुद्राक्ष माला, इसी पूजा में अभिमंत्रित होकर प्रसाद के साथ भेजी जाएगी।",
+    priceInPaise: 55100,
+    artKey: "rudraksh",
+    kind: "DELIVERY" as const,
+    order: 2,
+  },
+  {
+    slug: "abhimantrit-yantra",
+    nameEn: "Abhimantrit Yantra",
+    nameHi: "अभिमंत्रित यंत्र",
+    descEn: "Ashtadhatu yantra of this puja's deity, energised during the anushthan.",
+    descHi: "इस पूजा के देवता का अष्टधातु यंत्र, अनुष्ठान के दौरान अभिमंत्रित।",
+    priceInPaise: 85100,
+    artKey: "yantra",
+    kind: "DELIVERY" as const,
+    order: 3,
+  },
+  {
+    slug: "deepdaan-seva",
+    nameEn: "Deepdaan in Your Name",
+    nameHi: "आपके नाम से दीपदान",
+    descEn: "11 diyas offered at the temple with your name and gotra. Photo shared on WhatsApp.",
+    descHi: "आपके नाम व गोत्र से मंदिर में 11 दीपों का दान। फोटो व्हाट्सएप पर भेजी जाएगी।",
+    priceInPaise: 21100,
+    artKey: "diya",
+    kind: "SERVICE" as const,
+    order: 4,
+  },
+  {
+    slug: "annadaan-11-jan",
+    nameEn: "Annadaan for 11 People",
+    nameHi: "11 लोगों को अन्नदान",
+    descEn: "Bhojan prasad served to 11 devotees and brahmans in your family's name.",
+    descHi: "आपके परिवार के नाम से 11 भक्तों व ब्राह्मणों को भोजन प्रसाद।",
+    priceInPaise: 31100,
+    artKey: "peepal",
+    kind: "SERVICE" as const,
+    order: 5,
+  },
+  {
+    slug: "gau-seva",
+    nameEn: "Gau Seva (Cow Feeding)",
+    nameHi: "गौ सेवा (गाय को चारा)",
+    descEn: "Green fodder and gud offered to cows at the temple gaushala in your name.",
+    descHi: "आपके नाम से मंदिर की गौशाला में गायों को हरा चारा एवं गुड़।",
+    priceInPaise: 15100,
+    artKey: "lotus",
+    kind: "SERVICE" as const,
+    order: 6,
+  },
+];
+
 const TESTIMONIALS = [
   { name: "Ramesh Agarwal", city: "Indore", rating: 5, textEn: "I had been running behind a court matter for four years. After the Baglamukhi puja at Datia, the next hearing went in our favour. The pandit ji took my name and gotra clearly in the sankalp — I saw it in the video myself.", textHi: "चार वर्षों से एक न्यायालयीन प्रकरण में भाग-दौड़ चल रही थी। दतिया में बगलामुखी पूजा के बाद अगली सुनवाई हमारे पक्ष में गई। पंडित जी ने संकल्प में मेरा नाम और गोत्र स्पष्ट लिया — वीडियो में मैंने स्वयं देखा।", order: 1 },
   { name: "Sunita Deshmukh", city: "Pune", rating: 5, textEn: "My mother-in-law is 78 and was in hospital. We booked the Mahamrityunjay jaap the same night. The video came within a day and prasad reached in a week. It gave the whole family courage.", textHi: "मेरी सास 78 वर्ष की हैं और अस्पताल में थीं। हमने उसी रात महामृत्युंजय जाप बुक किया। वीडियो एक दिन में आ गया और प्रसाद एक सप्ताह में पहुँचा। पूरे परिवार को साहस मिला।", order: 2 },
@@ -514,6 +589,18 @@ async function main() {
   }
   console.log(`🛕 ${TEMPLES.length} temples`);
 
+  /* --- add-ons --- */
+  const addonIds: string[] = [];
+  for (const a of ADDONS) {
+    const [row] = await db
+      .insert(addons)
+      .values(a)
+      .onConflictDoUpdate({ target: addons.slug, set: { ...a, updatedAt: new Date() } })
+      .returning({ id: addons.id });
+    addonIds.push(row.id);
+  }
+  console.log(`🧺 ${ADDONS.length} add-ons`);
+
   /* --- pujas + packages --- */
   for (const p of PUJAS) {
     const values = {
@@ -539,6 +626,12 @@ async function main() {
       .values(values)
       .onConflictDoUpdate({ target: pujas.slug, set: values })
       .returning({ id: pujas.id });
+
+    // har puja me saare add-ons dikhenge (admin panel se badal sakte hain)
+    await db.delete(pujaAddons).where(eq(pujaAddons.pujaId, row.id));
+    await db.insert(pujaAddons).values(
+      addonIds.map((addonId, i) => ({ pujaId: row.id, addonId, order: i })),
+    );
 
     // packages dobara likhte hain taaki demo hamesha consistent rahe
     await db.delete(packages).where(eq(packages.pujaId, row.id));

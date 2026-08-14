@@ -3,9 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { adminUsers, packages, pujas } from "@/db/schema";
+import { addons, adminUsers, packages, pujaAddons, pujas } from "@/db/schema";
 import {
   attemptLogin,
   createSessionCookie,
@@ -16,6 +16,7 @@ import {
 } from "@/lib/auth";
 import { rateLimit } from "@/lib/rate-limit";
 import {
+  adminAddonSchema,
   adminBookingUpdateSchema,
   adminPujaSchema,
   firstError,
@@ -214,6 +215,8 @@ export async function savePujaAction(
     ritualsEn: parseLines(formData.get("ritualsEn")),
     ritualsHi: parseLines(formData.get("ritualsHi")),
     artKey: formData.get("artKey") ?? "om",
+    imageUrl: formData.get("imageUrl") ?? "",
+    addonIds: formData.getAll("addonIds").map((v) => String(v)),
     pujaDate: formData.get("pujaDate"),
     templeId: String(formData.get("templeId") ?? "") || null,
     categoryId: String(formData.get("categoryId") ?? "") || null,
@@ -243,6 +246,7 @@ export async function savePujaAction(
     ritualsEn: data.ritualsEn,
     ritualsHi: data.ritualsHi,
     artKey: data.artKey,
+    imageUrl: data.imageUrl || null,
     pujaDate,
     templeId: data.templeId || null,
     categoryId: data.categoryId || null,
@@ -309,10 +313,124 @@ export async function savePujaAction(
     }
   }
 
+  // Puja ke saath kaunse add-ons dikhein — dobara set kar dete hain
+  await db.delete(pujaAddons).where(eq(pujaAddons.pujaId, savedId));
+  if (data.addonIds.length > 0) {
+    const valid = await db
+      .select({ id: addons.id })
+      .from(addons)
+      .where(inArray(addons.id, data.addonIds));
+
+    if (valid.length > 0) {
+      await db.insert(pujaAddons).values(
+        valid.map((a, i) => ({ pujaId: savedId, addonId: a.id, order: i })),
+      );
+    }
+  }
+
   revalidatePath("/admin/pujas");
   revalidatePath("/pujas");
   revalidatePath(`/pujas/${data.slug}`);
   redirect("/admin/pujas?saved=1");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Add-ons                                                            */
+/* ------------------------------------------------------------------ */
+
+export async function saveAddonAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const session = await getAdminSession();
+  if (!session) return { error: "Login zaroori hai." };
+
+  const addonId = String(formData.get("addonId") ?? "");
+
+  const parsed = adminAddonSchema.safeParse({
+    slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
+    nameEn: formData.get("nameEn"),
+    nameHi: formData.get("nameHi"),
+    descEn: formData.get("descEn") ?? "",
+    descHi: formData.get("descHi") ?? "",
+    priceInPaise: Math.round(Number(formData.get("price") ?? 0) * 100),
+    imageUrl: formData.get("imageUrl") ?? "",
+    artKey: formData.get("artKey") ?? "kalash",
+    kind: formData.get("kind") ?? "SERVICE",
+    isActive: formData.get("isActive") === "on",
+    order: Number(formData.get("order") ?? 0),
+  });
+
+  if (!parsed.success) return { error: firstError(parsed.error) };
+  const d = parsed.data;
+
+  const values = {
+    slug: d.slug,
+    nameEn: d.nameEn,
+    nameHi: d.nameHi,
+    descEn: d.descEn,
+    descHi: d.descHi,
+    priceInPaise: d.priceInPaise,
+    imageUrl: d.imageUrl || null,
+    artKey: d.artKey,
+    kind: d.kind,
+    isActive: d.isActive,
+    order: d.order,
+    updatedAt: new Date(),
+  };
+
+  try {
+    if (addonId) {
+      await db.update(addons).set(values).where(eq(addons.id, addonId));
+    } else {
+      await db.insert(addons).values(values);
+    }
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("addons_slug_key") || msg.includes("duplicate key")) {
+      return { error: "Ye slug pehle se use ho raha hai. Koi doosra rakhein." };
+    }
+    console.error("[admin] addon save failed:", err);
+    return { error: "Save nahi ho paya. Dobara koshish karein." };
+  }
+
+  revalidatePath("/admin/addons");
+  revalidatePath("/pujas");
+  redirect("/admin/addons?saved=1");
+}
+
+export async function toggleAddonActiveAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const id = String(formData.get("addonId") ?? "");
+  const next = String(formData.get("next") ?? "") === "true";
+  if (!id) return;
+
+  await db
+    .update(addons)
+    .set({ isActive: next, updatedAt: new Date() })
+    .where(eq(addons.id, id));
+
+  revalidatePath("/admin/addons");
+  revalidatePath("/pujas");
+}
+
+export async function deleteAddonAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const id = String(formData.get("addonId") ?? "");
+  if (!id) return;
+
+  try {
+    await db.delete(addons).where(eq(addons.id, id));
+  } catch {
+    await db.update(addons).set({ isActive: false }).where(eq(addons.id, id));
+  }
+
+  revalidatePath("/admin/addons");
+  revalidatePath("/pujas");
 }
 
 export async function togglePujaActiveAction(formData: FormData) {

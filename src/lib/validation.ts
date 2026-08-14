@@ -23,6 +23,7 @@ export const bookingSchema = z.object({
   phone: phoneSchema,
   email: z.union([z.string().trim().email().max(200), z.literal("")]).optional(),
   memberNames: z.array(plainText(120)).max(20).optional().default([]),
+  addonIds: z.array(z.string().trim().max(64)).max(30).optional().default([]),
   sankalp: plainText(500).optional().default(""),
   addressLine: plainText(300).optional().default(""),
   city: plainText(120).optional().default(""),
@@ -78,6 +79,38 @@ const packageSchema = z.object({
   order: z.coerce.number().int().min(0).max(999).default(0),
 });
 
+/** Cloudinary/https photo URL — khaali bhi ho sakta hai */
+const imageUrl = z
+  .union([
+    z
+      .string()
+      .trim()
+      .max(600)
+      .refine((v) => /^https:\/\//i.test(v), { message: "Photo ka link https:// hona chahiye" }),
+    z.literal(""),
+  ])
+  .optional()
+  .default("");
+
+export const adminAddonSchema = z.object({
+  slug: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9-]+$/, "Sirf chhote letters, number aur hyphen")
+    .min(2)
+    .max(160),
+  nameEn: plainText(200).pipe(z.string().min(2)),
+  nameHi: plainText(200).pipe(z.string().min(1)),
+  descEn: plainText(600).default(""),
+  descHi: plainText(600).default(""),
+  priceInPaise: z.coerce.number().int().min(0).max(100_000_000),
+  imageUrl,
+  artKey: z.string().trim().max(40).default("kalash"),
+  kind: z.enum(["DELIVERY", "SERVICE"]),
+  isActive: z.boolean().default(true),
+  order: z.coerce.number().int().min(0).max(9999).default(0),
+});
+
 export const adminPujaSchema = z.object({
   slug: z
     .string()
@@ -96,6 +129,8 @@ export const adminPujaSchema = z.object({
   ritualsEn: z.array(plainText(300)).max(20).default([]),
   ritualsHi: z.array(plainText(300)).max(20).default([]),
   artKey: z.string().trim().max(40).default("om"),
+  imageUrl,
+  addonIds: z.array(z.string().trim().max(64)).max(30).default([]),
   pujaDate: z.string().trim().min(4),
   templeId: z.string().trim().max(64).nullable().optional(),
   categoryId: z.string().trim().max(64).nullable().optional(),

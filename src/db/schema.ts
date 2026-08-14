@@ -12,6 +12,7 @@ import {
   timestamp,
   index,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -40,8 +41,16 @@ export const paymentStatusEnum = pgEnum("payment_status", [
   "DEMO_SKIPPED",
 ]);
 
+/**
+ * Add-on ka prakaar:
+ *  DELIVERY = ghar bhejna padta hai (prasad, mala) → pata zaroori
+ *  SERVICE  = mandir me hi ho jata hai (deepdaan, annadaan) → pata nahi chahiye
+ */
+export const addonKindEnum = pgEnum("addon_kind", ["DELIVERY", "SERVICE"]);
+
 export type BookingStatus = (typeof bookingStatusEnum.enumValues)[number];
 export type PaymentStatus = (typeof paymentStatusEnum.enumValues)[number];
+export type AddonKind = (typeof addonKindEnum.enumValues)[number];
 
 const id = () =>
   text("id")
@@ -138,6 +147,8 @@ export const pujas = pgTable(
       .notNull()
       .default(sql`ARRAY[]::text[]`),
     artKey: varchar("art_key", { length: 40 }).notNull().default("om"),
+    // Asli photo (Cloudinary). Khaali ho to artKey wali SVG artwork dikhti hai.
+    imageUrl: text("image_url"),
     pujaDate: timestamp("puja_date", { withTimezone: true }).notNull(),
     isFeatured: boolean("is_featured").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
@@ -188,6 +199,76 @@ export const packages = pgTable(
 );
 
 /* ------------------------------------------------------------------ */
+/*  Add-ons (extra saamaan / seva)                                     */
+/* ------------------------------------------------------------------ */
+
+export const addons = pgTable(
+  "addons",
+  {
+    id: id(),
+    slug: varchar("slug", { length: 160 }).notNull(),
+    nameEn: varchar("name_en", { length: 200 }).notNull(),
+    nameHi: varchar("name_hi", { length: 200 }).notNull(),
+    descEn: text("desc_en").notNull().default(""),
+    descHi: text("desc_hi").notNull().default(""),
+    priceInPaise: integer("price_in_paise").notNull(),
+    imageUrl: text("image_url"),
+    artKey: varchar("art_key", { length: 40 }).notNull().default("kalash"),
+    kind: addonKindEnum("kind").notNull().default("SERVICE"),
+    isActive: boolean("is_active").notNull().default(true),
+    order: integer("sort_order").notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("addons_slug_key").on(t.slug),
+    index("addons_active_idx").on(t.isActive, t.order),
+  ],
+);
+
+/** Kaunsi puja me kaunse add-on dikhein */
+export const pujaAddons = pgTable(
+  "puja_addons",
+  {
+    pujaId: text("puja_id")
+      .notNull()
+      .references(() => pujas.id, { onDelete: "cascade" }),
+    addonId: text("addon_id")
+      .notNull()
+      .references(() => addons.id, { onDelete: "cascade" }),
+    order: integer("sort_order").notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.pujaId, t.addonId] }),
+    index("puja_addons_puja_idx").on(t.pujaId),
+  ],
+);
+
+/**
+ * Booking ke saath chune gaye add-ons.
+ * Naam aur price yahan copy karke rakhte hain — agar admin baad me
+ * add-on ka daam badle to purani booking ka record nahi badalna chahiye.
+ */
+export const bookingAddons = pgTable(
+  "booking_addons",
+  {
+    id: id(),
+    bookingId: text("booking_id")
+      .notNull()
+      .references(() => bookings.id, { onDelete: "cascade" }),
+    addonId: text("addon_id").references(() => addons.id, {
+      onDelete: "set null",
+    }),
+    nameEn: varchar("name_en", { length: 200 }).notNull(),
+    nameHi: varchar("name_hi", { length: 200 }).notNull(),
+    priceInPaise: integer("price_in_paise").notNull(),
+    quantity: integer("quantity").notNull().default(1),
+    kind: addonKindEnum("kind").notNull().default("SERVICE"),
+  },
+  (t) => [index("booking_addons_booking_idx").on(t.bookingId)],
+);
+
+/* ------------------------------------------------------------------ */
 /*  Bookings                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -218,6 +299,8 @@ export const bookings = pgTable(
     state: varchar("state", { length: 120 }),
     pincode: varchar("pincode", { length: 10 }),
 
+    packageAmountInPaise: integer("package_amount_in_paise").notNull().default(0),
+    addonsAmountInPaise: integer("addons_amount_in_paise").notNull().default(0),
     amountInPaise: integer("amount_in_paise").notNull(),
     status: bookingStatusEnum("status").notNull().default("PENDING_PAYMENT"),
     paymentStatus: paymentStatusEnum("payment_status")
@@ -362,6 +445,24 @@ export const pujaRelations = relations(pujas, ({ one, many }) => ({
   temple: one(temples, { fields: [pujas.templeId], references: [temples.id] }),
   packages: many(packages),
   bookings: many(bookings),
+  pujaAddons: many(pujaAddons),
+}));
+
+export const addonRelations = relations(addons, ({ many }) => ({
+  pujaAddons: many(pujaAddons),
+}));
+
+export const pujaAddonRelations = relations(pujaAddons, ({ one }) => ({
+  puja: one(pujas, { fields: [pujaAddons.pujaId], references: [pujas.id] }),
+  addon: one(addons, { fields: [pujaAddons.addonId], references: [addons.id] }),
+}));
+
+export const bookingAddonRelations = relations(bookingAddons, ({ one }) => ({
+  booking: one(bookings, {
+    fields: [bookingAddons.bookingId],
+    references: [bookings.id],
+  }),
+  addon: one(addons, { fields: [bookingAddons.addonId], references: [addons.id] }),
 }));
 
 export const packageRelations = relations(packages, ({ one, many }) => ({
@@ -408,3 +509,5 @@ export type Testimonial = typeof testimonials.$inferSelect;
 export type Faq = typeof faqs.$inferSelect;
 export type AdminUser = typeof adminUsers.$inferSelect;
 export type BookingEvent = typeof bookingEvents.$inferSelect;
+export type Addon = typeof addons.$inferSelect;
+export type BookingAddon = typeof bookingAddons.$inferSelect;

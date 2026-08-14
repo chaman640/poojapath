@@ -1,7 +1,14 @@
 import "server-only";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { bookingEvents, bookings, packages, pujas } from "@/db/schema";
+import {
+  addons,
+  bookingEvents,
+  bookings,
+  packages,
+  pujaAddons,
+  pujas,
+} from "@/db/schema";
 import type { BookingStatus } from "@/db/schema";
 import { sendBookingConfirmation, sendStatusUpdate } from "./whatsapp";
 import { siteConfig } from "./env";
@@ -187,4 +194,31 @@ export async function resolvePujaAndPackage(pujaSlug: string, packageId: string)
     .limit(1);
 
   return row ?? null;
+}
+
+/**
+ * Sirf wahi add-ons maano jo (a) is puja se jude hain, (b) active hain.
+ * Daam hamesha database se — browser se aaya price kabhi use nahi karte.
+ */
+export async function resolveAddons(pujaId: string, addonIds: string[]) {
+  const unique = Array.from(new Set(addonIds.filter(Boolean))).slice(0, 30);
+  if (unique.length === 0) return [];
+
+  return db
+    .select({
+      id: addons.id,
+      nameEn: addons.nameEn,
+      nameHi: addons.nameHi,
+      priceInPaise: addons.priceInPaise,
+      kind: addons.kind,
+    })
+    .from(pujaAddons)
+    .innerJoin(addons, eq(pujaAddons.addonId, addons.id))
+    .where(
+      and(
+        eq(pujaAddons.pujaId, pujaId),
+        eq(addons.isActive, true),
+        inArray(addons.id, unique),
+      ),
+    );
 }

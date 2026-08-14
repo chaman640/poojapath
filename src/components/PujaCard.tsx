@@ -1,5 +1,5 @@
 import Link from "next/link";
-import SacredArt from "./SacredArt";
+import PujaImage from "./PujaImage";
 import { getDict, pick, type Lang } from "@/lib/i18n";
 import { formatDateShort, formatINR } from "@/lib/utils";
 import type { PujaListItem } from "@/lib/queries";
@@ -25,7 +25,13 @@ export default function PujaCard({
   return (
     <article className="card card-hover group flex flex-col overflow-hidden">
       <Link href={`/pujas/${puja.slug}`} className="relative block">
-        <SacredArt artKey={puja.artKey} className="aspect-[16/10] w-full" />
+        <PujaImage
+          imageUrl={puja.imageUrl}
+          artKey={puja.artKey}
+          alt={title}
+          width={640}
+          className="aspect-[16/10] w-full"
+        />
 
         <div className="absolute left-3 top-3 flex flex-wrap gap-1.5">
           {category && (

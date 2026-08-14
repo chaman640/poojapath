@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { asc } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { categories, temples } from "@/db/schema";
+import { addons, categories, temples } from "@/db/schema";
 import PujaForm, { type PujaFormValues } from "../PujaForm";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ function defaultDateTimeLocal() {
 }
 
 export default async function NewPujaPage() {
-  const [templeList, categoryList] = await Promise.all([
+  const [templeList, categoryList, addonList] = await Promise.all([
     db
       .select({ id: temples.id, nameEn: temples.nameEn, cityEn: temples.cityEn })
       .from(temples)
@@ -23,6 +23,18 @@ export default async function NewPujaPage() {
       .select({ id: categories.id, nameEn: categories.nameEn })
       .from(categories)
       .orderBy(asc(categories.order)),
+    db
+      .select({
+        id: addons.id,
+        nameEn: addons.nameEn,
+        nameHi: addons.nameHi,
+        priceInPaise: addons.priceInPaise,
+        imageUrl: addons.imageUrl,
+        kind: addons.kind,
+      })
+      .from(addons)
+      .where(eq(addons.isActive, true))
+      .orderBy(asc(addons.order)),
   ]);
 
   const initial: PujaFormValues = {
@@ -38,6 +50,8 @@ export default async function NewPujaPage() {
     ritualsEn: "",
     ritualsHi: "",
     artKey: "om",
+    imageUrl: "",
+    addonIds: addonList.map((a) => a.id),
     pujaDate: defaultDateTimeLocal(),
     templeId: "",
     categoryId: "",
@@ -70,7 +84,12 @@ export default async function NewPujaPage() {
         <h1 className="mt-1 text-2xl">Nayi puja</h1>
       </div>
 
-      <PujaForm initial={initial} temples={templeList} categories={categoryList} />
+      <PujaForm
+        initial={initial}
+        temples={templeList}
+        categories={categoryList}
+        allAddons={addonList}
+      />
     </div>
   );
 }

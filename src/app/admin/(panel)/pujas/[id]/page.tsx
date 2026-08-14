@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { categories, packages, pujas, temples } from "@/db/schema";
+import { addons, categories, packages, pujaAddons, pujas, temples } from "@/db/schema";
 import PujaForm, { type PujaFormValues } from "../PujaForm";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +22,7 @@ export default async function EditPujaPage({
   const [puja] = await db.select().from(pujas).where(eq(pujas.id, id)).limit(1);
   if (!puja) notFound();
 
-  const [pkgs, templeList, categoryList] = await Promise.all([
+  const [pkgs, templeList, categoryList, addonList, linked] = await Promise.all([
     db
       .select()
       .from(packages)
@@ -36,6 +36,22 @@ export default async function EditPujaPage({
       .select({ id: categories.id, nameEn: categories.nameEn })
       .from(categories)
       .orderBy(asc(categories.order)),
+    db
+      .select({
+        id: addons.id,
+        nameEn: addons.nameEn,
+        nameHi: addons.nameHi,
+        priceInPaise: addons.priceInPaise,
+        imageUrl: addons.imageUrl,
+        kind: addons.kind,
+      })
+      .from(addons)
+      .where(eq(addons.isActive, true))
+      .orderBy(asc(addons.order)),
+    db
+      .select({ addonId: pujaAddons.addonId })
+      .from(pujaAddons)
+      .where(eq(pujaAddons.pujaId, puja.id)),
   ]);
 
   const initial: PujaFormValues = {
@@ -52,6 +68,8 @@ export default async function EditPujaPage({
     ritualsEn: puja.ritualsEn.join("\n"),
     ritualsHi: puja.ritualsHi.join("\n"),
     artKey: puja.artKey,
+    imageUrl: puja.imageUrl ?? "",
+    addonIds: linked.map((l) => l.addonId),
     pujaDate: toDateTimeLocal(puja.pujaDate),
     templeId: puja.templeId ?? "",
     categoryId: puja.categoryId ?? "",
@@ -90,7 +108,12 @@ export default async function EditPujaPage({
         </Link>
       </div>
 
-      <PujaForm initial={initial} temples={templeList} categories={categoryList} />
+      <PujaForm
+        initial={initial}
+        temples={templeList}
+        categories={categoryList}
+        allAddons={addonList}
+      />
     </div>
   );
 }

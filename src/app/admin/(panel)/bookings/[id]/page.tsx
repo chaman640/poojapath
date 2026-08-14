@@ -2,7 +2,14 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { asc, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { bookingEvents, bookings, packages, pujas, temples } from "@/db/schema";
+import {
+  bookingAddons,
+  bookingEvents,
+  bookings,
+  packages,
+  pujas,
+  temples,
+} from "@/db/schema";
 import { formatDate, formatINR } from "@/lib/utils";
 import StatusBadge from "../../StatusBadge";
 import BookingUpdateForm from "./BookingUpdateForm";
@@ -36,11 +43,14 @@ export default async function AdminBookingDetail({
   if (!row) notFound();
   const b = row.b;
 
-  const events = await db
-    .select()
-    .from(bookingEvents)
-    .where(eq(bookingEvents.bookingId, b.id))
-    .orderBy(asc(bookingEvents.createdAt));
+  const [events, extras] = await Promise.all([
+    db
+      .select()
+      .from(bookingEvents)
+      .where(eq(bookingEvents.bookingId, b.id))
+      .orderBy(asc(bookingEvents.createdAt)),
+    db.select().from(bookingAddons).where(eq(bookingAddons.bookingId, b.id)),
+  ]);
 
   const waLink = `https://wa.me/${b.phone.replace(/\D/g, "")}`;
 
@@ -55,8 +65,19 @@ export default async function AdminBookingDetail({
     ["Puja", row.pujaTitle],
     ["Temple", row.templeName ? `${row.templeName}, ${row.templeCity}` : "—"],
     ["Puja date", formatDate(row.pujaDate, "en")],
-    ["Package", row.pkgName],
-    ["Amount", formatINR(b.amountInPaise)],
+    ["Package", `${row.pkgName} — ${formatINR(b.packageAmountInPaise || b.amountInPaise)}`],
+    [
+      "Add-ons",
+      extras.length
+        ? extras
+            .map(
+              (x) =>
+                `${x.kind === "DELIVERY" ? "📦" : "🪔"} ${x.nameEn} (${formatINR(x.priceInPaise)})`,
+            )
+            .join(", ")
+        : "—",
+    ],
+    ["Total amount", formatINR(b.amountInPaise)],
     ["Payment status", b.paymentStatus],
     ["Razorpay order", b.razorpayOrderId ?? "—"],
     ["Razorpay payment", b.razorpayPaymentId ?? "—"],

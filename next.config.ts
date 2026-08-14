@@ -10,8 +10,10 @@ const csp = [
   "script-src 'self' 'unsafe-inline' https://checkout.razorpay.com https://*.razorpay.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
+  // Photos Cloudinary se aati hain; admin manually koi doosra https link bhi
+  // paste kar sakta hai, isliye https images allow hain (sirf images).
   "img-src 'self' data: blob: https:",
-  "connect-src 'self' https://*.razorpay.com https://lumberjack.razorpay.com",
+  "connect-src 'self' https://*.razorpay.com https://lumberjack.razorpay.com https://api.cloudinary.com",
   "frame-src 'self' https://api.razorpay.com https://*.razorpay.com",
   "form-action 'self'",
   "frame-ancestors 'none'",

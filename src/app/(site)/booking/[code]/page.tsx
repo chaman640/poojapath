@@ -4,13 +4,13 @@ import { notFound } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { bookingEvents } from "@/db/schema";
-import SacredArt from "@/components/SacredArt";
+import PujaImage from "@/components/PujaImage";
 import BookingTimeline from "@/components/BookingTimeline";
 import { getLangDict } from "@/lib/lang-server";
 import { pick } from "@/lib/i18n";
 import { formatDate, formatINR, maskPhone } from "@/lib/utils";
 import { siteConfig } from "@/lib/env";
-import { getBookingByCode } from "@/lib/queries";
+import { getBookingAddons, getBookingByCode } from "@/lib/queries";
 
 export const metadata: Metadata = {
   title: "Booking Status",
@@ -28,11 +28,14 @@ export default async function BookingStatusPage({ params }: { params: Params }) 
 
   const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
 
-  const events = await db
-    .select()
-    .from(bookingEvents)
-    .where(eq(bookingEvents.bookingId, booking.id))
-    .orderBy(bookingEvents.createdAt);
+  const [events, extras] = await Promise.all([
+    db
+      .select()
+      .from(bookingEvents)
+      .where(eq(bookingEvents.bookingId, booking.id))
+      .orderBy(bookingEvents.createdAt),
+    getBookingAddons(booking.id),
+  ]);
 
   const title = pick(lang, puja.titleEn, puja.titleHi);
   const temple = pick(lang, templeNameEn ?? "", templeNameHi ?? "");
@@ -88,7 +91,13 @@ export default async function BookingStatusPage({ params }: { params: Params }) 
       {/* -------- Details -------- */}
       <div className="mt-8 grid gap-6 md:grid-cols-[1fr_1.1fr]">
         <div className="card overflow-hidden">
-          <SacredArt artKey={puja.artKey} className="aspect-[16/9] w-full" />
+          <PujaImage
+            imageUrl={puja.imageUrl}
+            artKey={puja.artKey}
+            alt={title}
+            width={640}
+            className="aspect-[16/9] w-full"
+          />
           <div className="p-5">
             <h2 className="text-base leading-snug">{title}</h2>
             {temple && (
@@ -114,6 +123,27 @@ export default async function BookingStatusPage({ params }: { params: Params }) 
                 </div>
               ))}
             </dl>
+
+            {extras.length > 0 && (
+              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
+                  {lang === "hi" ? "अतिरिक्त सामान / सेवा" : "Extra items & seva"}
+                </p>
+                <ul className="mt-2 space-y-1.5">
+                  {extras.map((x) => (
+                    <li key={x.id} className="flex justify-between gap-3 text-[13px]">
+                      <span className="text-ink/70">
+                        {x.kind === "DELIVERY" ? "📦" : "🪔"}{" "}
+                        {pick(lang, x.nameEn, x.nameHi)}
+                      </span>
+                      <span className="shrink-0 font-semibold text-maroon-800">
+                        {formatINR(x.priceInPaise)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {booking.sankalp && (
               <div className="mt-4 rounded-xl bg-saffron-50 p-3">

@@ -16,7 +16,7 @@ export default function WhatsappFloat({ whatsapp }: { whatsapp: string }) {
       href={`https://wa.me/${number}?text=${text}`}
       target="_blank"
       rel="noopener noreferrer"
-      className="fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-3 text-sm font-bold text-white shadow-lift transition hover:brightness-105 active:scale-95"
+      className="wa-float fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-full bg-[#25D366] px-4 py-3 text-sm font-bold text-white shadow-lift transition hover:brightness-105 active:scale-95"
       aria-label="WhatsApp"
     >
       <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
