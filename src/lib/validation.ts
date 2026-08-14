@@ -132,8 +132,17 @@ export const adminPujaSchema = z.object({
   imageUrl,
   addonIds: z.array(z.string().trim().max(64)).max(30).default([]),
   pujaDate: z.string().trim().min(4),
-  templeId: z.string().trim().max(64).nullable().optional(),
-  categoryId: z.string().trim().max(64).nullable().optional(),
+
+  // Mandir aur category dono ab type kiye ja sakte hain.
+  // Naam pehle se ho to wahi use hota hai, naya ho to apne aap ban jata hai.
+  templeName: plainText(200).default(""),
+  templeNameHi: plainText(200).default(""),
+  templeCity: plainText(120).default(""),
+  templeCityHi: plainText(120).default(""),
+  templeState: plainText(120).default(""),
+  templeStateHi: plainText(120).default(""),
+  categoryName: plainText(160).default(""),
+  categoryNameHi: plainText(160).default(""),
   isFeatured: z.boolean().default(false),
   isActive: z.boolean().default(true),
   seatsTotal: z.coerce.number().int().min(0).max(100000).nullable().optional(),

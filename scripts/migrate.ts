@@ -25,8 +25,12 @@ async function main() {
     !connectionString.includes("127.0.0.1") &&
     !connectionString.includes("sslmode=disable");
 
+  const cleanUrl = connectionString
+    .replace(/([?&])sslmode=[^&]*&?/g, "$1")
+    .replace(/[?&]$/, "");
+
   const pool = new Pool({
-    connectionString,
+    connectionString: cleanUrl,
     ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
     max: 1,
   });

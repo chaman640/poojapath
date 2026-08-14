@@ -16,11 +16,18 @@ function defaultDateTimeLocal() {
 export default async function NewPujaPage() {
   const [templeList, categoryList, addonList] = await Promise.all([
     db
-      .select({ id: temples.id, nameEn: temples.nameEn, cityEn: temples.cityEn })
+      .select({
+        nameEn: temples.nameEn,
+        nameHi: temples.nameHi,
+        cityEn: temples.cityEn,
+        cityHi: temples.cityHi,
+        stateEn: temples.stateEn,
+        stateHi: temples.stateHi,
+      })
       .from(temples)
       .orderBy(asc(temples.nameEn)),
     db
-      .select({ id: categories.id, nameEn: categories.nameEn })
+      .select({ nameEn: categories.nameEn, nameHi: categories.nameHi })
       .from(categories)
       .orderBy(asc(categories.order)),
     db
@@ -53,8 +60,8 @@ export default async function NewPujaPage() {
     imageUrl: "",
     addonIds: addonList.map((a) => a.id),
     pujaDate: defaultDateTimeLocal(),
-    templeId: "",
-    categoryId: "",
+    temple: { nameEn: "", nameHi: "", cityEn: "", cityHi: "", stateEn: "", stateHi: "" },
+    category: { nameEn: "", nameHi: "" },
     isFeatured: false,
     isActive: true,
     seatsTotal: "",

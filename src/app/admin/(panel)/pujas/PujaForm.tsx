@@ -6,6 +6,8 @@ import Link from "next/link";
 import { savePujaAction, type ActionState } from "../../actions";
 import { ART_KEYS } from "@/components/SacredArt";
 import ImageUploader from "@/components/admin/ImageUploader";
+import TempleField, { type TempleOption } from "@/components/admin/TempleField";
+import CategoryField, { type CategoryOption } from "@/components/admin/CategoryField";
 import { formatINR, optimizedImage } from "@/lib/utils";
 
 export type AddonOption = {
@@ -46,8 +48,8 @@ export type PujaFormValues = {
   imageUrl: string;
   addonIds: string[];
   pujaDate: string;
-  templeId: string;
-  categoryId: string;
+  temple: TempleOption;
+  category: CategoryOption;
   isFeatured: boolean;
   isActive: boolean;
   seatsTotal: string;
@@ -100,8 +102,8 @@ export default function PujaForm({
   allAddons,
 }: {
   initial: PujaFormValues;
-  temples: Array<{ id: string; nameEn: string; cityEn: string }>;
-  categories: Array<{ id: string; nameEn: string }>;
+  temples: TempleOption[];
+  categories: CategoryOption[];
   allAddons: AddonOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(savePujaAction, {});
@@ -179,26 +181,9 @@ export default function PujaForm({
             <input name="subtitleHi" maxLength={300} defaultValue={initial.subtitleHi} className="input" />
           </Field>
 
-          <Field label="Temple">
-            <select name="templeId" defaultValue={initial.templeId} className="input">
-              <option value="">— koi nahi —</option>
-              {temples.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.nameEn} ({t.cityEn})
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Category">
-            <select name="categoryId" defaultValue={initial.categoryId} className="input">
-              <option value="">— koi nahi —</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.nameEn}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <TempleField temples={temples} initial={initial.temple} />
+
+          <CategoryField categories={categories} initial={initial.category} />
 
           <Field label="Artwork" hint="Card par kaunsa chinh dikhega">
             <select name="artKey" defaultValue={initial.artKey} className="input">

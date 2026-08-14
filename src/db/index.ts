@@ -19,14 +19,18 @@ function createPool() {
     );
   }
 
-  // Render / kisi bhi managed Postgres par SSL chahiye hota hai.
+  // Render / Neon / kisi bhi managed Postgres par SSL chahiye hota hai.
   const needsSsl =
     !connectionString.includes("localhost") &&
     !connectionString.includes("127.0.0.1") &&
     !connectionString.includes("sslmode=disable");
 
+  // SSL hum khud neeche set kar rahe hain, isliye URL se sslmode hata dete hain —
+  // warna pg ek bekaar sa "SECURITY WARNING" log karta rehta hai.
+  const cleanUrl = connectionString.replace(/([?&])sslmode=[^&]*&?/g, "$1").replace(/[?&]$/, "");
+
   return new Pool({
-    connectionString,
+    connectionString: cleanUrl,
     ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
     max: Number(process.env.DB_POOL_MAX ?? 10),
     idleTimeoutMillis: 30_000,

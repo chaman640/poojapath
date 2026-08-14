@@ -5,9 +5,25 @@ import type { NextConfig } from "next";
  * Razorpay checkout ke liye zaroori domains allow kiye gaye hain.
  * Agar aap koi naya third-party script add karein to usko yahan add karna hoga.
  */
+const isDev = process.env.NODE_ENV !== "production";
+
+/**
+ * Development me Next.js (Turbopack) ko hot-reload aur debugging ke liye
+ * eval() chahiye hota hai. Production build me ye kabhi use nahi hota,
+ * isliye 'unsafe-eval' sirf dev me allow karte hain.
+ */
+const scriptSrc = [
+  "script-src 'self' 'unsafe-inline'",
+  isDev ? "'unsafe-eval'" : "",
+  "https://checkout.razorpay.com https://*.razorpay.com",
+  "https://securegw.paytm.in https://securegw-stage.paytm.in",
+]
+  .filter(Boolean)
+  .join(" ");
+
 const csp = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://checkout.razorpay.com https://*.razorpay.com https://securegw.paytm.in https://securegw-stage.paytm.in",
+  scriptSrc,
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://securegw.paytm.in https://securegw-stage.paytm.in",
   "font-src 'self' https://fonts.gstatic.com data:",
   // Photos Cloudinary se aati hain; admin manually koi doosra https link bhi

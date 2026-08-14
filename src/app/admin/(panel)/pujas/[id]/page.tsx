@@ -29,11 +29,18 @@ export default async function EditPujaPage({
       .where(and(eq(packages.pujaId, puja.id), eq(packages.isActive, true)))
       .orderBy(asc(packages.order)),
     db
-      .select({ id: temples.id, nameEn: temples.nameEn, cityEn: temples.cityEn })
+      .select({
+        nameEn: temples.nameEn,
+        nameHi: temples.nameHi,
+        cityEn: temples.cityEn,
+        cityHi: temples.cityHi,
+        stateEn: temples.stateEn,
+        stateHi: temples.stateHi,
+      })
       .from(temples)
       .orderBy(asc(temples.nameEn)),
     db
-      .select({ id: categories.id, nameEn: categories.nameEn })
+      .select({ nameEn: categories.nameEn, nameHi: categories.nameHi })
       .from(categories)
       .orderBy(asc(categories.order)),
     db
@@ -54,6 +61,37 @@ export default async function EditPujaPage({
       .where(eq(pujaAddons.pujaId, puja.id)),
   ]);
 
+  const [currentTempleRow] = puja.templeId
+    ? await db
+        .select()
+        .from(temples)
+        .where(eq(temples.id, puja.templeId))
+        .limit(1)
+    : [];
+
+  const [currentCategoryRow] = puja.categoryId
+    ? await db
+        .select()
+        .from(categories)
+        .where(eq(categories.id, puja.categoryId))
+        .limit(1)
+    : [];
+
+  const currentTemple = currentTempleRow
+    ? {
+        nameEn: currentTempleRow.nameEn,
+        nameHi: currentTempleRow.nameHi,
+        cityEn: currentTempleRow.cityEn,
+        cityHi: currentTempleRow.cityHi,
+        stateEn: currentTempleRow.stateEn,
+        stateHi: currentTempleRow.stateHi,
+      }
+    : { nameEn: "", nameHi: "", cityEn: "", cityHi: "", stateEn: "", stateHi: "" };
+
+  const currentCategory = currentCategoryRow
+    ? { nameEn: currentCategoryRow.nameEn, nameHi: currentCategoryRow.nameHi }
+    : { nameEn: "", nameHi: "" };
+
   const initial: PujaFormValues = {
     id: puja.id,
     slug: puja.slug,
@@ -71,8 +109,8 @@ export default async function EditPujaPage({
     imageUrl: puja.imageUrl ?? "",
     addonIds: linked.map((l) => l.addonId),
     pujaDate: toDateTimeLocal(puja.pujaDate),
-    templeId: puja.templeId ?? "",
-    categoryId: puja.categoryId ?? "",
+    temple: currentTemple,
+    category: currentCategory,
     isFeatured: puja.isFeatured,
     isActive: puja.isActive,
     seatsTotal: puja.seatsTotal != null ? String(puja.seatsTotal) : "",

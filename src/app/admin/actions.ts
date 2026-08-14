@@ -9,9 +9,11 @@ import {
   addons,
   adminUsers,
   bookings,
+  categories,
   packages,
   pujaAddons,
   pujas,
+  temples,
 } from "@/db/schema";
 import {
   attemptLogin,
@@ -30,6 +32,7 @@ import {
   loginSchema,
 } from "@/lib/validation";
 import { changeBookingStatus } from "@/lib/booking-service";
+import { slugify } from "@/lib/utils";
 
 export type ActionState = { error?: string; success?: string };
 
@@ -200,6 +203,101 @@ function parsePackagesFromForm(formData: FormData) {
   return out;
 }
 
+/** Slug banao aur unique bana do (agar pehle se hai to -2, -3 lagao) */
+async function uniqueSlug(
+  base: string,
+  exists: (slug: string) => Promise<boolean>,
+): Promise<string> {
+  const root = slugify(base) || "item";
+  let candidate = root;
+  for (let i = 2; i < 50; i++) {
+    if (!(await exists(candidate))) return candidate;
+    candidate = `${root}-${i}`;
+  }
+  return `${root}-${Date.now()}`;
+}
+
+/**
+ * Mandir ka naam type kiya gaya hai —
+ * pehle se hai to wahi lelo, naya hai to bana do.
+ */
+async function findOrCreateTemple(input: {
+  nameEn: string;
+  nameHi: string;
+  cityEn: string;
+  cityHi: string;
+  stateEn: string;
+  stateHi: string;
+}): Promise<string | null> {
+  const nameEn = input.nameEn.trim();
+  if (!nameEn) return null;
+
+  const [existing] = await db
+    .select({ id: temples.id })
+    .from(temples)
+    .where(sql`lower(${temples.nameEn}) = lower(${nameEn})`)
+    .limit(1);
+
+  if (existing) return existing.id;
+
+  const slug = await uniqueSlug(nameEn, async (s) => {
+    const [row] = await db
+      .select({ id: temples.id })
+      .from(temples)
+      .where(eq(temples.slug, s))
+      .limit(1);
+    return Boolean(row);
+  });
+
+  const [created] = await db
+    .insert(temples)
+    .values({
+      slug,
+      nameEn,
+      nameHi: input.nameHi.trim() || nameEn,
+      cityEn: input.cityEn.trim() || "—",
+      cityHi: input.cityHi.trim() || input.cityEn.trim() || "—",
+      stateEn: input.stateEn.trim() || "India",
+      stateHi: input.stateHi.trim() || input.stateEn.trim() || "भारत",
+    })
+    .returning({ id: temples.id });
+
+  return created.id;
+}
+
+/** Category ka naam type kiya gaya hai — pehle se hai to wahi, warna nayi ban jayegi */
+async function findOrCreateCategory(
+  nameEn: string,
+  nameHi: string,
+): Promise<string | null> {
+  const clean = nameEn.trim();
+  if (!clean) return null;
+
+  const [existing] = await db
+    .select({ id: categories.id })
+    .from(categories)
+    .where(sql`lower(${categories.nameEn}) = lower(${clean})`)
+    .limit(1);
+
+  if (existing) return existing.id;
+
+  const slug = await uniqueSlug(clean, async (s) => {
+    const [row] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(eq(categories.slug, s))
+      .limit(1);
+    return Boolean(row);
+  });
+
+  const [created] = await db
+    .insert(categories)
+    .values({ slug, nameEn: clean, nameHi: nameHi.trim() || clean, order: 99 })
+    .returning({ id: categories.id });
+
+  return created.id;
+}
+
 export async function savePujaAction(
   _prev: ActionState,
   formData: FormData,
@@ -225,8 +323,14 @@ export async function savePujaAction(
     imageUrl: formData.get("imageUrl") ?? "",
     addonIds: formData.getAll("addonIds").map((v) => String(v)),
     pujaDate: formData.get("pujaDate"),
-    templeId: String(formData.get("templeId") ?? "") || null,
-    categoryId: String(formData.get("categoryId") ?? "") || null,
+    templeName: formData.get("templeName") ?? "",
+    templeNameHi: formData.get("templeNameHi") ?? "",
+    templeCity: formData.get("templeCity") ?? "",
+    templeCityHi: formData.get("templeCityHi") ?? "",
+    templeState: formData.get("templeState") ?? "",
+    templeStateHi: formData.get("templeStateHi") ?? "",
+    categoryName: formData.get("categoryName") ?? "",
+    categoryNameHi: formData.get("categoryNameHi") ?? "",
     isFeatured: formData.get("isFeatured") === "on",
     isActive: formData.get("isActive") === "on",
     seatsTotal: formData.get("seatsTotal") ? Number(formData.get("seatsTotal")) : null,
@@ -239,6 +343,17 @@ export async function savePujaAction(
 
   const pujaDate = new Date(data.pujaDate);
   if (Number.isNaN(pujaDate.getTime())) return { error: "Puja ki tareekh sahi nahi hai." };
+
+  // Mandir aur category: naam se dhoondo, na mile to naya bana do
+  const templeId = await findOrCreateTemple({
+    nameEn: data.templeName,
+    nameHi: data.templeNameHi,
+    cityEn: data.templeCity,
+    cityHi: data.templeCityHi,
+    stateEn: data.templeState,
+    stateHi: data.templeStateHi,
+  });
+  const categoryId = await findOrCreateCategory(data.categoryName, data.categoryNameHi);
 
   const values = {
     slug: data.slug,
@@ -255,8 +370,8 @@ export async function savePujaAction(
     artKey: data.artKey,
     imageUrl: data.imageUrl || null,
     pujaDate,
-    templeId: data.templeId || null,
-    categoryId: data.categoryId || null,
+    templeId,
+    categoryId,
     isFeatured: data.isFeatured,
     isActive: data.isActive,
     seatsTotal: data.seatsTotal ?? null,

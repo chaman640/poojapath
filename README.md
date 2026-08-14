@@ -302,6 +302,8 @@ Jab tak key nahi hai, message server log me print hote hain (`[whatsapp:demo] ..
 | Kaam | Kahan |
 |---|---|
 | Nayi puja daalna | Admin → Pujas → **+ Nayi puja add karein** |
+| Naya mandir jodna | Puja form me mandir ka naam **type kar dein** — naya mandir apne aap ban jayega |
+| Naya puja type (category) | Waise hi — category box me naya naam type kar dein |
 | Puja ki photo lagana | Puja kholein → upar **Photo chunein** |
 | Naya add-on banana | Admin → Add-ons → **+ Naya add-on** |
 | Puja me add-ons lagana | Puja kholein → neeche checkbox tick karein |
