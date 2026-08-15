@@ -121,6 +121,7 @@ export const dict = {
       s4Required: "Address is required for the items you selected",
       s4Optional: "Optional — fill it if you want prasad at home",
       review: "Please check once",
+      reviewSub: "Everything correct? Then proceed to payment.",
       addonsAdded: "items added",
       selected: "Selected",
       add: "Add",
@@ -132,11 +133,11 @@ export const dict = {
 
     track: {
       title: "Track Your Booking",
-      subtitle: "Booking ID aur registered mobile number daalein",
+      subtitle: "Apna mobile number daalein — saari pujaayein dikh jaayengi",
       code: "Booking ID",
       codePh: "PP-260810-XXXXXX",
       phone: "Registered Mobile Number",
-      notFound: "Is Booking ID aur number se koi booking nahi mili.",
+      notFound: "Is number par koi booking nahi mili. Number dobara check karein.",
     },
     status: {
       PENDING_PAYMENT: "Payment pending",
@@ -293,6 +294,7 @@ export const dict = {
       s4Required: "आपने जो सामान चुना है, उसके लिए पता ज़रूरी है",
       s4Optional: "वैकल्पिक — प्रसाद घर मंगवाना हो तो भरें",
       review: "एक बार जाँच लें",
+      reviewSub: "सब सही है? तो भुगतान करें।",
       addonsAdded: "चीज़ें जोड़ी गईं",
       selected: "चुना गया",
       add: "जोड़ें",
@@ -304,11 +306,11 @@ export const dict = {
 
     track: {
       title: "अपनी बुकिंग देखें",
-      subtitle: "बुकिंग आईडी और रजिस्टर्ड मोबाइल नंबर डालें",
+      subtitle: "अपना मोबाइल नंबर डालें — आपकी सारी पूजाएँ दिख जाएँगी",
       code: "बुकिंग आईडी",
       codePh: "PP-260810-XXXXXX",
       phone: "रजिस्टर्ड मोबाइल नंबर",
-      notFound: "इस बुकिंग आईडी और नंबर से कोई बुकिंग नहीं मिली।",
+      notFound: "इस नंबर पर कोई बुकिंग नहीं मिली। नंबर दोबारा जाँच लें।",
     },
     status: {
       PENDING_PAYMENT: "भुगतान बाकी",

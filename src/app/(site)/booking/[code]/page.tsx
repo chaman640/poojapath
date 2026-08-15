@@ -18,9 +18,17 @@ export const metadata: Metadata = {
 };
 
 type Params = Promise<{ code: string }>;
+type Search = Promise<{ paid?: string; pending?: string; failed?: string }>;
 
-export default async function BookingStatusPage({ params }: { params: Params }) {
+export default async function BookingStatusPage({
+  params,
+  searchParams,
+}: {
+  params: Params;
+  searchParams: Search;
+}) {
   const { code } = await params;
+  const sp = await searchParams;
   const { lang, t } = await getLangDict();
 
   const data = await getBookingByCode(decodeURIComponent(code));
@@ -41,6 +49,54 @@ export default async function BookingStatusPage({ params }: { params: Params }) 
   const temple = pick(lang, templeNameEn ?? "", templeNameHi ?? "");
   const isConfirmed = booking.status !== "PENDING_PAYMENT";
   const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
+  const paymentPending = sp.pending === "1" && !isConfirmed;
+  const paymentFailed = sp.failed === "1" && !isConfirmed;
+
+  /**
+   * "Details save karein" — user ke tap karte hi WhatsApp khulta hai aur
+   * poori booking admin ke number par chali jati hai. Isse admin ke paas
+   * har booking WhatsApp me bhi save ho jati hai.
+   */
+  const saveDetailsText = [
+    `🪔 ${t.brand} — ${lang === "hi" ? "बुकिंग विवरण" : "Booking details"}`,
+    "",
+    `${lang === "hi" ? "बुकिंग आईडी" : "Booking ID"}: ${booking.bookingCode}`,
+    `${lang === "hi" ? "नाम" : "Name"}: ${booking.devoteeName}`,
+    `${lang === "hi" ? "गोत्र" : "Gotra"}: ${booking.gotra}`,
+    `${lang === "hi" ? "मोबाइल" : "Mobile"}: ${booking.phone}`,
+    ...(booking.memberNames.length
+      ? [`${lang === "hi" ? "सदस्य" : "Members"}: ${booking.memberNames.join(", ")}`]
+      : []),
+    "",
+    `${lang === "hi" ? "पूजा" : "Puja"}: ${title}`,
+    ...(temple ? [`${lang === "hi" ? "मंदिर" : "Temple"}: ${temple}`] : []),
+    `${lang === "hi" ? "पूजा तिथि" : "Puja date"}: ${formatDate(puja.pujaDate, lang)}`,
+    `${lang === "hi" ? "पैकेज" : "Package"}: ${pick(lang, pkg.nameEn, pkg.nameHi)}`,
+    ...(extras.length
+      ? [
+          `${lang === "hi" ? "अतिरिक्त" : "Add-ons"}: ${extras
+            .map((x) => pick(lang, x.nameEn, x.nameHi))
+            .join(", ")}`,
+        ]
+      : []),
+    `${lang === "hi" ? "कुल राशि" : "Total"}: ${formatINR(booking.amountInPaise)}`,
+    ...(booking.addressLine
+      ? [
+          "",
+          `${lang === "hi" ? "पता" : "Address"}: ${[
+            booking.addressLine,
+            booking.city,
+            booking.state,
+            booking.pincode,
+          ]
+            .filter(Boolean)
+            .join(", ")}`,
+        ]
+      : []),
+    ...(booking.sankalp ? ["", `${lang === "hi" ? "संकल्प" : "Sankalp"}: ${booking.sankalp}`] : []),
+  ].join("\n");
+
+  const saveDetailsLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(saveDetailsText)}`;
 
   return (
     <div className="container-x max-w-4xl py-10 sm:py-14">
@@ -83,10 +139,60 @@ export default async function BookingStatusPage({ params }: { params: Params }) 
 
         <p className="mt-3 text-[12px] text-ink/50">
           {lang === "hi"
-            ? "इस आईडी को सुरक्षित रखें — इसी से आप कभी भी स्थिति देख सकते हैं।"
-            : "Save this ID — you can check your status with it anytime."}
+            ? "अपना मोबाइल नंबर डालकर आप कभी भी इस पूजा की स्थिति देख सकते हैं।"
+            : "You can check this puja's status anytime by entering your mobile number."}
         </p>
+
+        {/* -------- Details WhatsApp par bhejein -------- */}
+        {isConfirmed && (
+          <div className="mx-auto mt-6 max-w-md rounded-2xl border-2 border-dashed border-[#25D366]/40 bg-white/70 p-4">
+            <p className="text-[13.5px] font-bold text-maroon-800">
+              {lang === "hi"
+                ? "📲 अपना विवरण हमें भेज दें"
+                : "📲 Send your details to us"}
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink/60">
+              {lang === "hi"
+                ? "एक बार दबाइए — व्हाट्सएप खुलेगा और आपकी पूरी बुकिंग हमारे पास पहुँच जाएगी। इससे पंडित जी को आपका नाम, गोत्र और पूजा की तिथि मिल जाएगी।"
+                : "One tap — WhatsApp opens with your full booking ready to send. This gives our pandit ji your name, gotra and puja date."}
+            </p>
+            <a
+              href={saveDetailsLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-big mt-4 bg-[#25D366] text-white hover:brightness-105"
+            >
+              {lang === "hi" ? "व्हाट्सएप पर भेजें" : "Send on WhatsApp"}
+            </a>
+          </div>
+        )}
       </div>
+
+      {/* -------- Payment ke baad ke messages -------- */}
+      {paymentPending && (
+        <p className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-[14px] leading-relaxed text-amber-900">
+          ⏳{" "}
+          {lang === "hi"
+            ? "भुगतान की पुष्टि हो रही है। बैंक से जवाब आते ही आपकी बुकिंग अपने आप कन्फर्म हो जाएगी — यह पेज थोड़ी देर बाद दोबारा खोलें। पैसा कट गया हो तो चिंता न करें, राशि सुरक्षित है।"
+            : "Your payment is being confirmed. As soon as the bank responds your booking will confirm automatically — reopen this page in a little while. If money was deducted, it is safe."}
+        </p>
+      )}
+
+      {paymentFailed && (
+        <div className="mt-5 rounded-2xl border border-red-300 bg-red-50 px-5 py-4 text-[14px] leading-relaxed text-red-800">
+          <p className="font-bold">
+            {lang === "hi" ? "भुगतान पूरा नहीं हुआ" : "Payment did not go through"}
+          </p>
+          <p className="mt-1">
+            {lang === "hi"
+              ? "आपकी बुकिंग सुरक्षित है। दोबारा प्रयास करें — कोई राशि नहीं कटी है।"
+              : "Your booking is saved. Please try again — no amount has been deducted."}
+          </p>
+          <Link href={`/pujas/${puja.slug}`} className="btn-primary mt-3 px-5 py-2.5">
+            {lang === "hi" ? "दोबारा भुगतान करें" : "Try payment again"}
+          </Link>
+        </div>
+      )}
 
       {/* -------- Details -------- */}
       <div className="mt-8 grid gap-6 md:grid-cols-[1fr_1.1fr]">

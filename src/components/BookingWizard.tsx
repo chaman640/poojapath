@@ -113,6 +113,7 @@ export default function BookingWizard({
   paymentLive: boolean;
 }) {
   const { lang, t } = useLang();
+  const brandName = t.brand;
   const router = useRouter();
   const topRef = useRef<HTMLDivElement>(null);
 
@@ -157,8 +158,8 @@ export default function BookingWizard({
 
   // step index → kaunsa screen
   const screens = hasAddons
-    ? (["package", "addons", "details", "address"] as const)
-    : (["package", "details", "address"] as const);
+    ? (["package", "addons", "details", "review"] as const)
+    : (["package", "details", "review"] as const);
   const screen = screens[step];
 
   function go(next: number) {
@@ -327,7 +328,7 @@ export default function BookingWizard({
         key: data.payment.keyId,
         amount: data.payment.amount,
         currency: data.payment.currency,
-        name: "Pooja Path",
+        name: brandName,
         description: pujaTitle.slice(0, 120),
         order_id: data.payment.orderId,
         prefill: {
@@ -337,6 +338,12 @@ export default function BookingWizard({
         },
         notes: { bookingCode: data.bookingCode },
         theme: { color: "#C2410C" },
+        // Payment ke baad Razorpay khud humare server par bhej dega, aur
+        // server user ko booking page par redirect kar dega. JS handler ke
+        // bharose nahi rehte — mobile par UPI app se wapas aane par wo
+        // kabhi-kabhi chalta hi nahi tha.
+        callback_url: `${window.location.origin}/api/payment/razorpay/callback`,
+        redirect: true,
         modal: {
           ondismiss: () => {
             setBusy(false);
@@ -346,20 +353,6 @@ export default function BookingWizard({
                 : "Payment cancelled. Your booking is saved — you can try again.",
             );
           },
-        },
-        handler: async (response: Record<string, string>) => {
-          const verify = await fetch("/api/payment/verify", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(response),
-          });
-          const vd = await verify.json();
-          if (verify.ok && vd.ok) {
-            router.push(`/booking/${vd.bookingCode}`);
-          } else {
-            setBusy(false);
-            setError(vd.error || "Payment verify nahi hua. Support se sampark karein.");
-          }
         },
       });
 
@@ -384,7 +377,7 @@ export default function BookingWizard({
 
   if (!selectedPackage) return null;
 
-  const isLast = screen === "address";
+  const isLast = screen === "review";
 
   return (
     <div className="relative" ref={topRef}>
@@ -398,7 +391,7 @@ export default function BookingWizard({
             {screen === "package" && t.wizard.s1Title}
             {screen === "addons" && t.wizard.s2Title}
             {screen === "details" && t.wizard.s3Title}
-            {screen === "address" && (needsAddress ? t.wizard.s4Title : t.wizard.review)}
+            {screen === "review" && (needsAddress ? t.wizard.s4Title : t.wizard.review)}
           </h2>
         </div>
         <StepDots current={step} total={steps} />
@@ -408,8 +401,8 @@ export default function BookingWizard({
         {screen === "package" && t.wizard.s1Sub}
         {screen === "addons" && t.wizard.s2Sub}
         {screen === "details" && t.wizard.s3Sub}
-        {screen === "address" &&
-          (needsAddress ? t.wizard.s4Required : t.wizard.s4Optional)}
+        {screen === "review" &&
+          (needsAddress ? t.wizard.s4Required : t.wizard.reviewSub)}
       </p>
 
       {/* ---------- Step 1: package ---------- */}
@@ -661,14 +654,14 @@ export default function BookingWizard({
         </div>
       )}
 
-      {/* ---------- Step 4: address + review ---------- */}
-      {screen === "address" && (
+      {/* ---------- Last step: (address only if needed) + review ---------- */}
+      {screen === "review" && (
         <div className="space-y-5">
+          {needsAddress && (
           <div className="space-y-4">
             <div>
               <label className="label-lg" htmlFor="w-addr">
-                {t.booking.addressLine}{" "}
-                {needsAddress && <span className="text-maroon-600">*</span>}
+                {t.booking.addressLine} <span className="text-maroon-600">*</span>
               </label>
               <input
                 id="w-addr"
@@ -684,7 +677,7 @@ export default function BookingWizard({
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className="label-lg" htmlFor="w-city">
-                  {t.booking.city} {needsAddress && <span className="text-maroon-600">*</span>}
+                  {t.booking.city} <span className="text-maroon-600">*</span>
                 </label>
                 <input
                   id="w-city"
@@ -697,7 +690,7 @@ export default function BookingWizard({
               </div>
               <div>
                 <label className="label-lg" htmlFor="w-state">
-                  {t.booking.state} {needsAddress && <span className="text-maroon-600">*</span>}
+                  {t.booking.state} <span className="text-maroon-600">*</span>
                 </label>
                 <input
                   id="w-state"
@@ -712,7 +705,7 @@ export default function BookingWizard({
 
             <div>
               <label className="label-lg" htmlFor="w-pin">
-                {t.booking.pincode} {needsAddress && <span className="text-maroon-600">*</span>}
+                {t.booking.pincode} <span className="text-maroon-600">*</span>
               </label>
               <input
                 id="w-pin"
@@ -728,6 +721,7 @@ export default function BookingWizard({
               />
             </div>
           </div>
+          )}
 
           {/* Summary */}
           <div className="rounded-2xl border-2 border-saffron-200 bg-white p-4">

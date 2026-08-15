@@ -27,8 +27,8 @@ export default async function TrackPage() {
 
         <p className="mx-auto mt-6 max-w-md text-center text-[13px] leading-relaxed text-ink/55">
           {lang === "hi"
-            ? "बुकिंग आईडी आपको बुकिंग के तुरंत बाद स्क्रीन पर और व्हाट्सएप पर मिली थी। न मिले तो हमें व्हाट्सएप करें।"
-            : "Your Booking ID was shown right after booking and sent on WhatsApp. If you can't find it, message us on WhatsApp."}
+            ? "कोई लॉगिन या बुकिंग आईडी याद रखने की ज़रूरत नहीं — बस वही नंबर डालें जो बुकिंग में दिया था। कुछ न मिले तो हमें व्हाट्सएप करें।"
+            : "No login or Booking ID needed — just enter the number you used while booking. If nothing shows up, message us on WhatsApp."}
         </p>
       </section>
     </>

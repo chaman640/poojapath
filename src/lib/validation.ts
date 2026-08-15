@@ -37,8 +37,12 @@ export const bookingSchema = z.object({
 
 export type BookingInput = z.infer<typeof bookingSchema>;
 
+/**
+ * Tracking: sirf phone number zaroori hai.
+ * Booking ID optional — de diya to seedha usi booking par le jate hain.
+ */
 export const trackSchema = z.object({
-  bookingCode: z.string().trim().min(6).max(40),
+  bookingCode: z.union([z.string().trim().max(40), z.literal("")]).optional(),
   phone: phoneSchema,
 });
 

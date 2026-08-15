@@ -17,10 +17,11 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
   1. Kitne logon ka → 2. Kuch extra chahiye (add-ons) → 3. Naam, gotra, number → 4. Pata + payment
   Bade buttons, neeche hamesha total dikhta hai, koi login nahi
 - **Add-ons** — prasad ghar par, rudraksh mala, deepdaan, annadaan… tap karke jodo.
-  "Ghar bhejne wale" add-on chunte hi pata bharna zaroori ho jata hai
+  Sirf "ghar bhejne wale" add-on chunne par hi pata maanga jata hai, warna bilkul nahi
 - **Razorpay** payment (UPI, card, netbanking) — Paytm par switch karna ho to bhi tayyar
 - Services & Pricing page (`/pricing`) — payment gateway KYC ke liye
-- Booking status page + "Track Booking" (Booking ID + number se)
+- Booking status page + **"Track Booking" sirf mobile number se** — saari pujaayein list me
+- Booking page par **"Send on WhatsApp"** — ek tap me poori booking admin ke WhatsApp par
 - Chadhava (offerings) aur Divine Store (products)
 - About, Contact (form ke saath), Privacy / Terms / Refund / Shipping
 - **Hindi ⇄ English toggle** — poori site, ek click me
@@ -66,9 +67,10 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Session hijack | JWT `httpOnly` + `Secure` cookie, 8 ghante me expire, `tokenVersion` se turant invalidate |
 | Admin bypass | Auth **har page aur har action me** server-side check hota hai — middleware par bharosa nahi (wo bypass ho sakta hai) |
 | Payment tampering | Amount hamesha database se, kabhi browser se nahi; Razorpay HMAC signature verify + server-to-server payment fetch se confirm |
+| Redirect toot-na | Payment ke baad Razorpay seedha server par callback karta hai (`/api/payment/razorpay/callback`) — mobile/UPI par bhi redirect pakka |
 | Fake webhook | `x-razorpay-signature` HMAC verify (Paytm ke liye CHECKSUMHASH) — bina sahi signature ke reject |
 | Spam bookings/messages | IP rate limiting + contact form me honeypot |
-| Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block |
+| Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block; list me sirf puja/tithi/status — naam, gotra, pata nahi |
 | Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` |
 | Data leak | IP plain me store nahi (sirf hash); admin pages `noindex` + `no-store` |
 | Secrets | Sab `.env` me, `.gitignore` me — code me kahin hardcode nahi |

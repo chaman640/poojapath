@@ -31,7 +31,7 @@ const csp = [
   "img-src 'self' data: blob: https:",
   "connect-src 'self' https://*.razorpay.com https://lumberjack.razorpay.com https://api.cloudinary.com https://securegw.paytm.in https://securegw-stage.paytm.in",
   "frame-src 'self' https://api.razorpay.com https://*.razorpay.com https://securegw.paytm.in https://securegw-stage.paytm.in",
-  "form-action 'self' https://securegw.paytm.in https://securegw-stage.paytm.in",
+  "form-action 'self' https://api.razorpay.com https://*.razorpay.com https://securegw.paytm.in https://securegw-stage.paytm.in",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "object-src 'none'",
