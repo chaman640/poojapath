@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { bookingEvents } from "@/db/schema";
+import { bookingEvents, bookings } from "@/db/schema";
 import PujaImage from "@/components/PujaImage";
 import BookingTimeline from "@/components/BookingTimeline";
 import PendingPaymentWatcher from "@/components/PendingPaymentWatcher";
+import PaidWhatsappRedirect from "@/components/PaidWhatsappRedirect";
 import { reconcileByBookingCode } from "@/lib/payments/reconcile";
 import { getLangDict } from "@/lib/lang-server";
 import { pick } from "@/lib/i18n";
@@ -20,7 +21,12 @@ export const metadata: Metadata = {
 };
 
 type Params = Promise<{ code: string }>;
-type Search = Promise<{ paid?: string; pending?: string; failed?: string }>;
+type Search = Promise<{
+  paid?: string;
+  pending?: string;
+  failed?: string;
+  wa?: string;
+}>;
 
 export default async function BookingStatusPage({
   params,
@@ -49,13 +55,22 @@ export default async function BookingStatusPage({
 
   const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
 
-  const [events, extras] = await Promise.all([
+  const [events, extras, [freshRow]] = await Promise.all([
     db
       .select()
       .from(bookingEvents)
       .where(eq(bookingEvents.bookingId, booking.id))
       .orderBy(bookingEvents.createdAt),
     getBookingAddons(booking.id),
+    // "Abhi-abhi confirm hui?" — samay ka hisaab database karta hai,
+    // taaki page ka render pure rahe (React ki shart).
+    db
+      .select({
+        fresh: sql<boolean>`${bookings.updatedAt} > now() - interval '5 minutes'`,
+      })
+      .from(bookings)
+      .where(eq(bookings.id, booking.id))
+      .limit(1),
   ]);
 
   const title = pick(lang, puja.titleEn, puja.titleHi);
@@ -64,6 +79,23 @@ export default async function BookingStatusPage({
   const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
   const paymentPending = sp.pending === "1" && !isConfirmed;
   const paymentFailed = sp.failed === "1" && !isConfirmed;
+
+  /**
+   * Abhi-abhi payment karke aaye hain? To WhatsApp apne aap khul jayega.
+   *
+   * Do halaat me khulta hai:
+   *   • Razorpay ka callback `?paid=1` lagakar bhejta hai, ya
+   *   • booking pichhle 5 minute me confirm hui ho (callback toot gaya
+   *     ho aur reconcile ne abhi confirm ki ho — tab bhi grahak payment
+   *     karke hi aaya hoga)
+   *
+   * Ek baar chalne ke baad URL me `wa=done` lag jata hai, isliye refresh
+   * ya back dabane par dobara nahi khulta.
+   */
+  const openWhatsapp =
+    isConfirmed &&
+    sp.wa !== "done" &&
+    (sp.paid === "1" || Boolean(freshRow?.fresh));
 
   /**
    * "Details save karein" — user ke tap karte hi WhatsApp khulta hai aur
@@ -180,6 +212,11 @@ export default async function BookingStatusPage({
           </div>
         )}
       </div>
+
+      {/* Payment karke abhi aaye hain — WhatsApp apne aap khol dete hain */}
+      {openWhatsapp && (
+        <PaidWhatsappRedirect link={saveDetailsLink} hi={lang === "hi"} />
+      )}
 
       {/* Pending ho to page chup-chaap refresh hota rahega — jaise hi
           Razorpay "paisa mil gaya" kahega, booking apne aap confirm dikhegi */}
