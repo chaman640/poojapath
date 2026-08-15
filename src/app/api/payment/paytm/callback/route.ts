@@ -1,10 +1,9 @@
-import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings } from "@/db/schema";
-import { siteConfig } from "@/lib/env";
 import { paytm } from "@/lib/payments";
 import { confirmBookingPaid, markBookingFailed } from "@/lib/booking-service";
+import { paymentRedirect } from "@/lib/payments/redirect";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,8 +18,6 @@ export const dynamic = "force-dynamic";
  * Browser se aaye "STATUS" par kabhi bharosa nahi karte.
  */
 export async function POST(req: Request) {
-  const base = siteConfig.url.replace(/\/$/, "");
-
   let fields: Record<string, string> = {};
   try {
     const form = await req.formData();
@@ -30,7 +27,7 @@ export async function POST(req: Request) {
     try {
       fields = (await req.json()) as Record<string, string>;
     } catch {
-      return NextResponse.redirect(`${base}/track?error=callback`, 303);
+      return paymentRedirect(`/track?error=callback`, req);
     }
   }
 
@@ -38,14 +35,14 @@ export async function POST(req: Request) {
   const checksum = fields.CHECKSUMHASH || "";
 
   if (!orderId) {
-    return NextResponse.redirect(`${base}/track?error=missing-order`, 303);
+    return paymentRedirect(`/track?error=missing-order`, req);
   }
 
   // 1. Checksum verify
   const checksumOk = paytm.verifySignature({ ...fields }, checksum);
   if (!checksumOk) {
     console.warn("[paytm] checksum mismatch for order", orderId);
-    return NextResponse.redirect(`${base}/booking/${orderId}?verify=failed`, 303);
+    return paymentRedirect(`/booking/${orderId}?verify=failed`, req);
   }
 
   // 2. Booking dhoondo
@@ -56,7 +53,7 @@ export async function POST(req: Request) {
     .limit(1);
 
   if (!booking) {
-    return NextResponse.redirect(`${base}/track?error=not-found`, 303);
+    return paymentRedirect(`/track?error=not-found`, req);
   }
 
   // 3. Paytm se asli sthiti poochho (server-to-server)
@@ -71,34 +68,24 @@ export async function POST(req: Request) {
         bookingId: booking.id,
         providerPaymentId: status.txnId,
       });
-      return NextResponse.redirect(`${base}/booking/${booking.bookingCode}`, 303);
+      return paymentRedirect(`/booking/${booking.bookingCode}`, req);
     }
 
     if (status.pending) {
-      return NextResponse.redirect(
-        `${base}/booking/${booking.bookingCode}?pending=1`,
-        303,
-      );
+      return paymentRedirect(`/booking/${booking.bookingCode}?pending=1`, req);
     }
 
     await markBookingFailed(booking.id);
-    return NextResponse.redirect(
-      `${base}/booking/${booking.bookingCode}?failed=1`,
-      303,
-    );
+    return paymentRedirect(`/booking/${booking.bookingCode}?failed=1`, req);
   } catch (err) {
     console.error("[paytm] status check failed:", err);
-    return NextResponse.redirect(
-      `${base}/booking/${booking.bookingCode}?pending=1`,
-      303,
-    );
+    return paymentRedirect(`/booking/${booking.bookingCode}?pending=1`, req);
   }
 }
 
 /** Agar koi galti se GET kare to booking page par bhej do */
 export async function GET(req: Request) {
-  const base = siteConfig.url.replace(/\/$/, "");
   const url = new URL(req.url);
   const orderId = url.searchParams.get("ORDERID") ?? url.searchParams.get("orderId");
-  return NextResponse.redirect(orderId ? `${base}/booking/${orderId}` : `${base}/track`, 303);
+  return paymentRedirect(orderId ? `/booking/${orderId}` : "/track", req);
 }

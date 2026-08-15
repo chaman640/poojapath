@@ -346,12 +346,17 @@ export default function BookingWizard({
         redirect: true,
         modal: {
           ondismiss: () => {
-            setBusy(false);
-            setError(
-              lang === "hi"
-                ? "भुगतान रद्द हुआ। आपकी बुकिंग सुरक्षित है — दोबारा प्रयास करें।"
-                : "Payment cancelled. Your booking is saved — you can try again.",
-            );
+            // Razorpay redirect kar raha ho tab bhi ondismiss chal jata hai —
+            // thoda ruk kar dekho, page ja raha ho to "cancelled" mat dikhao
+            setTimeout(() => {
+              if (document.visibilityState === "hidden") return;
+              setBusy(false);
+              setError(
+                lang === "hi"
+                  ? "भुगतान रद्द हुआ। आपकी बुकिंग सुरक्षित है — दोबारा प्रयास करें।"
+                  : "Payment cancelled. Your booking is saved — you can try again.",
+              );
+            }, 1200);
           },
         },
       });

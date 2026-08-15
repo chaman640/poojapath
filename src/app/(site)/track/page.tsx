@@ -7,8 +7,24 @@ export const metadata: Metadata = {
   description: "Check the status of your puja booking with your Booking ID and mobile number.",
 };
 
-export default async function TrackPage() {
+export default async function TrackPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
   const { lang, t } = await getLangDict();
+  const { error } = await searchParams;
+
+  const errorMsg =
+    error === "payment-failed"
+      ? lang === "hi"
+        ? "भुगतान पूरा नहीं हुआ। नीचे अपना नंबर डालकर बुकिंग देख सकते हैं, या दोबारा प्रयास करें।"
+        : "The payment did not complete. Enter your number below to see the booking, or try again."
+      : error
+        ? lang === "hi"
+          ? "भुगतान की पुष्टि नहीं हो पाई। नीचे अपना नंबर डालकर बुकिंग की स्थिति देखें — पैसा कटा हो तो वह सुरक्षित है।"
+          : "We could not confirm the payment. Enter your number below to check the booking — if money was deducted it is safe."
+        : "";
 
   return (
     <>
@@ -23,6 +39,11 @@ export default async function TrackPage() {
       </section>
 
       <section className="container-x py-12">
+        {errorMsg && (
+          <p className="mx-auto mb-6 max-w-md rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-[14px] leading-relaxed text-amber-900">
+            ⚠️ {errorMsg}
+          </p>
+        )}
         <TrackForm />
 
         <p className="mx-auto mt-6 max-w-md text-center text-[13px] leading-relaxed text-ink/55">

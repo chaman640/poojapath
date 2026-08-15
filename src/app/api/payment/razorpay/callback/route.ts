@@ -1,10 +1,9 @@
-import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings } from "@/db/schema";
-import { siteConfig } from "@/lib/env";
 import { fetchPayment, verifyCheckoutSignature } from "@/lib/payments/razorpay";
 import { confirmBookingPaid, markBookingFailed } from "@/lib/booking-service";
+import { paymentRedirect } from "@/lib/payments/redirect";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,8 +19,6 @@ export const dynamic = "force-dynamic";
  * signature verify + Razorpay se seedha payment fetch hota hai.
  */
 export async function POST(req: Request) {
-  const base = siteConfig.url.replace(/\/$/, "");
-
   let fields: Record<string, string> = {};
   try {
     const form = await req.formData();
@@ -30,7 +27,7 @@ export async function POST(req: Request) {
     try {
       fields = (await req.json()) as Record<string, string>;
     } catch {
-      return NextResponse.redirect(`${base}/track?error=callback`, 303);
+      return paymentRedirect(`/track?error=callback`, req);
     }
   }
 
@@ -57,16 +54,16 @@ export async function POST(req: Request) {
         .limit(1);
       if (b) {
         await markBookingFailed(b.id);
-        return NextResponse.redirect(`${base}/booking/${b.bookingCode}?failed=1`, 303);
+        return paymentRedirect(`/booking/${b.bookingCode}?failed=1`, req);
       }
     }
-    return NextResponse.redirect(`${base}/track?error=payment-failed`, 303);
+    return paymentRedirect(`/track?error=payment-failed`, req);
   }
 
   /* ---------- Signature verify ---------- */
   if (!verifyCheckoutSignature({ orderId, paymentId, signature })) {
     console.warn("[razorpay] callback signature mismatch for", orderId);
-    return NextResponse.redirect(`${base}/track?error=verify`, 303);
+    return paymentRedirect(`/track?error=verify`, req);
   }
 
   const [booking] = await db
@@ -75,7 +72,7 @@ export async function POST(req: Request) {
     .where(eq(bookings.providerOrderId, orderId))
     .limit(1);
 
-  if (!booking) return NextResponse.redirect(`${base}/track?error=not-found`, 303);
+  if (!booking) return paymentRedirect(`/track?error=not-found`, req);
 
   /* ---------- Razorpay se asli status confirm ---------- */
   try {
@@ -86,24 +83,23 @@ export async function POST(req: Request) {
 
     if (!amountOk || !statusOk || !orderOk) {
       console.warn("[razorpay] callback mismatch", { orderId, amountOk, statusOk, orderOk });
-      return NextResponse.redirect(`${base}/booking/${booking.bookingCode}?pending=1`, 303);
+      return paymentRedirect(`/booking/${booking.bookingCode}?pending=1`, req);
     }
   } catch (err) {
     // Signature sahi hai — webhook thodi der me confirm kar dega
     console.error("[razorpay] callback fetch failed:", err);
-    return NextResponse.redirect(`${base}/booking/${booking.bookingCode}?pending=1`, 303);
+    return paymentRedirect(`/booking/${booking.bookingCode}?pending=1`, req);
   }
 
   await confirmBookingPaid({ bookingId: booking.id, providerPaymentId: paymentId });
 
-  return NextResponse.redirect(`${base}/booking/${booking.bookingCode}?paid=1`, 303);
+  return paymentRedirect(`/booking/${booking.bookingCode}?paid=1`, req);
 }
 
 /** Kabhi GET aa jaye to booking page par bhej do */
 export async function GET(req: Request) {
-  const base = siteConfig.url.replace(/\/$/, "");
   const orderId = new URL(req.url).searchParams.get("razorpay_order_id");
-  if (!orderId) return NextResponse.redirect(`${base}/track`, 303);
+  if (!orderId) return paymentRedirect(`/track`, req);
 
   const [booking] = await db
     .select({ code: bookings.bookingCode })
@@ -111,8 +107,5 @@ export async function GET(req: Request) {
     .where(eq(bookings.providerOrderId, orderId))
     .limit(1);
 
-  return NextResponse.redirect(
-    booking ? `${base}/booking/${booking.code}` : `${base}/track`,
-    303,
-  );
+  return paymentRedirect(booking ? `/booking/${booking.code}` : "/track", req);
 }
