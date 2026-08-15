@@ -74,8 +74,8 @@ export default async function AdminDashboard() {
             </p>
             <p className="mt-1 text-[12.5px] leading-relaxed text-amber-800">
               Site abhi Demo Mode me hai — booking ban jati hai par paisa nahi katta.
-              Render ke Environment tab me <code>PAYTM_MID</code> aur{" "}
-              <code>PAYTM_MERCHANT_KEY</code> daal kar redeploy karein.
+              Render ke Environment tab me <code>RAZORPAY_KEY_ID</code> aur{" "}
+              <code>RAZORPAY_KEY_SECRET</code> daal kar redeploy karein.
             </p>
           </div>
         )}
@@ -86,6 +86,11 @@ export default async function AdminDashboard() {
             </p>
             <p className="mt-1 text-[12.5px] leading-relaxed text-green-800">
               Bookings par asli payment liya ja raha hai.
+              {payProvider === "razorpay" && (
+                <>
+                  {" "}Webhook URL: <code>/api/payment/webhook</code>
+                </>
+              )}
             </p>
           </div>
         )}

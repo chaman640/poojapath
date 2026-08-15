@@ -18,7 +18,7 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
   Bade buttons, neeche hamesha total dikhta hai, koi login nahi
 - **Add-ons** — prasad ghar par, rudraksh mala, deepdaan, annadaan… tap karke jodo.
   "Ghar bhejne wale" add-on chunte hi pata bharna zaroori ho jata hai
-- **Paytm** payment (UPI, card, netbanking) — Razorpay par switch karna ho to bhi tayyar
+- **Razorpay** payment (UPI, card, netbanking) — Paytm par switch karna ho to bhi tayyar
 - Services & Pricing page (`/pricing`) — payment gateway KYC ke liye
 - Booking status page + "Track Booking" (Booking ID + number se)
 - Chadhava (offerings) aur Divine Store (products)
@@ -45,7 +45,7 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Language | TypeScript | Galtiyan likhte waqt hi pakdi jaati hain |
 | Styling | Tailwind CSS | Poora design custom, koi bhaari UI library nahi |
 | Database | **PostgreSQL** + Drizzle ORM | Reliable; saari queries parameterised (SQL injection se surakshit) |
-| Payment | **Paytm** (Razorpay bhi supported) | `.env` me ek line badal kar switch kar sakte hain |
+| Payment | **Razorpay** (Paytm bhi supported) | `.env` me ek line badal kar switch kar sakte hain |
 | Photos | **Cloudinary** | Free 25GB; photos apne aap WebP me convert hoti hain |
 | WhatsApp | AiSensy ya Interakt | `.env` me key daalte hi chalu |
 | Hosting | **Render** | Free tier, auto HTTPS, ek click deploy |
@@ -65,8 +65,8 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Brute force login | 6 galat koshish → account 30 min lock; IP par bhi rate limit |
 | Session hijack | JWT `httpOnly` + `Secure` cookie, 8 ghante me expire, `tokenVersion` se turant invalidate |
 | Admin bypass | Auth **har page aur har action me** server-side check hota hai — middleware par bharosa nahi (wo bypass ho sakta hai) |
-| Payment tampering | Amount hamesha database se, kabhi browser se nahi; Paytm checksum verify + Transaction Status API se server-to-server confirm |
-| Fake callback/webhook | Paytm CHECKSUMHASH aur Razorpay HMAC verify — bina sahi signature ke reject |
+| Payment tampering | Amount hamesha database se, kabhi browser se nahi; Razorpay HMAC signature verify + server-to-server payment fetch se confirm |
+| Fake webhook | `x-razorpay-signature` HMAC verify (Paytm ke liye CHECKSUMHASH) — bina sahi signature ke reject |
 | Spam bookings/messages | IP rate limiting + contact form me honeypot |
 | Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block |
 | Clickjacking | `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` |
@@ -153,68 +153,76 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 
 ---
 
-## Paytm payment gateway chalu karna
+## Razorpay payment gateway chalu karna
 
-Site **Paytm** ke liye tayyar hai. Jab tak keys nahi hain, "Demo Mode" me chalti hai —
+Site **Razorpay** ke liye tayyar hai. Jab tak keys nahi hain, "Demo Mode" me chalti hai —
 booking ban jati hai par paisa nahi katta.
 
-### 1. Paytm merchant account
+### 1. Razorpay account
 
-[business.paytm.com](https://business.paytm.com) par account banayein aur KYC poori karein
-(PAN, bank account, business proof). Approval ke baad Dashboard →
-**Developer Settings → API Keys** me ye do milenge:
+[razorpay.com](https://razorpay.com) par account banayein aur KYC poori karein
+(PAN, bank account, business proof). Dashboard → **Settings → API Keys → Generate Key**
+se do cheezein milengi:
 
-- **MID** (Merchant ID)
-- **Merchant Key** (16 characters)
+- **Key ID** (`rzp_test_...` ya `rzp_live_...`)
+- **Key Secret**
 
-### 2. Callback URL set karein
+### 2. Webhook banayein
 
-Paytm dashboard me website/callback URL ye rakhein:
+Dashboard → **Settings → Webhooks → Add New Webhook**
 
-```
-https://aapka-domain.com/api/payment/paytm/callback
-```
+| Field | Value |
+|---|---|
+| Webhook URL | `https://aapka-domain.com/api/payment/webhook` |
+| Secret | koi bhi random string (yahi neeche `.env` me bhi daalein) |
+| Active Events | `payment.captured`, `payment.failed`, `order.paid` |
 
 ### 3. Render → Environment me bharein
 
 ```
-PAYMENT_PROVIDER   = paytm
-PAYTM_MID          = aapka MID
-PAYTM_MERCHANT_KEY = aapki merchant key
-PAYTM_WEBSITE      = DEFAULT          # test ke liye: WEBSTAGING
-PAYTM_ENV          = production       # pehle test karna ho to: test
+PAYMENT_PROVIDER        = razorpay
+RAZORPAY_KEY_ID         = rzp_test_xxxxxxxx   (live ke liye rzp_live_...)
+RAZORPAY_KEY_SECRET     = xxxxxxxxxxxxxxxx
+RAZORPAY_WEBHOOK_SECRET = webhook wala secret
 ```
 
-**Redeploy** karein — payment live ho jayega.
+**Redeploy** karein — payment live ho jayega. Admin → Dashboard par green banner
+"✓ Payment gateway chalu hai (razorpay)" dikhne lagega.
 
-> **Pehle test karein:** `PAYTM_ENV=test` aur `PAYTM_WEBSITE=WEBSTAGING` rakh kar Paytm ki
-> staging keys se ek booking karke dekh lein. Sab theek lage to production par switch karein.
+> **Pehle test karein:** `rzp_test_` keys se ek booking karke dekh lein. Razorpay test mode
+> me UPI/card sab dummy chalte hain, asli paisa nahi katta. Sab theek lage to
+> `rzp_live_` keys daal kar redeploy karein.
 
-### Security — Paytm ke saath kya-kya hota hai
+### Security — Razorpay ke saath kya-kya hota hai
 
 - Amount hamesha database se jata hai, browser se kabhi nahi
-- Har request par Paytm ka **checksum** (AES + SHA-256) banta aur verify hota hai
-- Payment ke baad browser jo bhi kahe, uspar bharosa nahi — hum **Paytm ke server se
-  seedha Transaction Status API** se pooch kar hi booking confirm karte hain
-- Merchant Key sirf server par rehti hai, browser tak kabhi nahi jaati
+- Checkout ke baad browser jo signature bhejta hai wo **HMAC-SHA256** se verify hota hai
+- Uske baad bhi bharosa nahi — **Razorpay ke server se seedha payment fetch** karke
+  status aur amount dono match karte hain, tabhi booking confirm hoti hai
+- Webhook par `x-razorpay-signature` verify hota hai — bina sahi signature ke reject
+- Booking dobara confirm nahi hoti (webhook aur browser dono aayein tab bhi ek hi baar)
+- Key Secret sirf server par rehta hai, browser tak kabhi nahi jaata
 
-### Razorpay par switch karna ho to
+### Paytm par switch karna ho to
 
 `.env` me itna hi:
 
 ```
-PAYMENT_PROVIDER    = razorpay
-RAZORPAY_KEY_ID     = ...
-RAZORPAY_KEY_SECRET = ...
+PAYMENT_PROVIDER   = paytm
+PAYTM_MID          = ...
+PAYTM_MERCHANT_KEY = ...
+PAYTM_WEBSITE      = DEFAULT
+PAYTM_ENV          = production
 ```
 
-Razorpay ka code pehle se maujood hai — kuch aur badalne ki zaroorat nahi.
+Paytm ka poora code bhi maujood hai (callback URL: `/api/payment/paytm/callback`) —
+kuch aur badalne ki zaroorat nahi.
 
 ---
 
 ## Payment gateway KYC ke liye zaroori pages
 
-Paytm/Razorpay approval ke waqt ye pages maangte hain — **sab pehle se bane hue hain**:
+Razorpay/Paytm approval ke waqt ye pages maangte hain — **sab pehle se bane hue hain**:
 
 | Page | Link |
 |---|---|
