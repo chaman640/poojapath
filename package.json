@@ -11,7 +11,8 @@
     "db:seed": "tsx scripts/seed.ts",
     "db:generate": "npx drizzle-kit@0.31.10 generate",
     "test:reconcile": "tsx scripts/test-reconcile.mts",
-    "render-build": "npm run db:migrate && npm run db:seed && next build"
+    "render-build": "npm run db:migrate && npm run db:seed && next build",
+    "test:payment-flow": "tsx scripts/test-payment-flow.mts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

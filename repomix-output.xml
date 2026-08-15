@@ -51,6 +51,7 @@ scripts/
   load-env.ts
   migrate.ts
   seed.ts
+  test-reconcile.mts
 src/
   app/
     (site)/
@@ -93,6 +94,8 @@ src/
             page.tsx
           page.tsx
         messages/
+          page.tsx
+        payments/
           page.tsx
         pujas/
           [id]/
@@ -156,6 +159,7 @@ src/
     HowItWorks.tsx
     LanguageProvider.tsx
     Navbar.tsx
+    PendingPaymentWatcher.tsx
     PujaCard.tsx
     PujaImage.tsx
     SacredArt.tsx
@@ -172,7 +176,9 @@ src/
       index.ts
       paytm.ts
       razorpay.ts
+      reconcile.ts
       redirect.ts
+      webhook-log.ts
     auth.ts
     booking-service.ts
     cloudinary.ts
@@ -5395,6 +5401,47 @@ export default function Navbar() {
 }
 </file>
 
+<file path="src/components/PendingPaymentWatcher.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+
+/**
+ * Jab booking "payment pending" me atki ho, ye chup-chaap page ko
+ * bar-bar refresh karta hai. Har refresh par server Razorpay se
+ * poochhta hai ki paisa aaya ya nahi — jaise hi jawab "haan" aata hai,
+ * page apne aap confirm dikhane lagta hai.
+ *
+ * User ko kuch karna nahi padta — na refresh, na wapas aana.
+ * Do minute baad ye khud ruk jata hai taaki phone ki battery na jaye.
+ */
+export default function PendingPaymentWatcher({
+  attempts = 20,
+  everyMs = 6000,
+}: {
+  attempts?: number;
+  everyMs?: number;
+}) {
+  const router = useRouter();
+  const [tries, setTries] = useState(0);
+
+  useEffect(() => {
+    if (tries >= attempts) return;
+
+    const id = setTimeout(() => {
+      // tab background me ho to gateway ko na pitein
+      if (document.visibilityState === "visible") router.refresh();
+      setTries((n) => n + 1);
+    }, everyMs);
+
+    return () => clearTimeout(id);
+  }, [tries, attempts, everyMs, router]);
+
+  return null;
+}
+</file>
+
 <file path="src/components/PujaImage.tsx">
 import SacredArt from "./SacredArt";
 import { cn, optimizedImage } from "@/lib/utils";
@@ -6258,6 +6305,40 @@ function resolveBase(req?: Request): string {
 }
 </file>
 
+<file path="src/lib/payments/webhook-log.ts">
+import "server-only";
+
+/**
+ * Webhook aa raha hai ya nahi — iska chhota sa record.
+ *
+ * Sirf memory me rehta hai (server restart par mit jata hai). Maqsad sirf
+ * itna hai ki Admin → Payments page par ye dikh sake: "webhook zinda hai"
+ * ya "abhi tak ek bhi webhook nahi aaya". Isse pata chal jata hai ki
+ * Razorpay dashboard me URL sahi daala gaya hai ya nahi.
+ */
+
+type WebhookHit = {
+  at: number;
+  event: string;
+  ok: boolean;
+  detail: string;
+};
+
+let last: WebhookHit | null = null;
+let total = 0;
+let rejected = 0;
+
+export function recordWebhook(hit: Omit<WebhookHit, "at">) {
+  last = { ...hit, at: Date.now() };
+  total++;
+  if (!hit.ok) rejected++;
+}
+
+export function webhookStatus() {
+  return { last, total, rejected };
+}
+</file>
+
 <file path="src/lib/auth.ts">
 import "server-only";
 import { cookies } from "next/headers";
@@ -6934,51 +7015,6 @@ const eslintConfig = [
 ];
 
 export default eslintConfig;
-</file>
-
-<file path="package.json">
-{
-  "name": "pooja-path",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint .",
-    "db:migrate": "tsx scripts/migrate.ts",
-    "db:seed": "tsx scripts/seed.ts",
-    "db:generate": "npx drizzle-kit@0.31.10 generate",
-    "render-build": "npm run db:migrate && npm run db:seed && next build"
-  },
-  "dependencies": {
-    "bcryptjs": "^3.0.2",
-    "drizzle-orm": "^0.45.2",
-    "jose": "^6.0.12",
-    "next": "16.3.0",
-    "pg": "^8.16.3",
-    "razorpay": "^2.9.6",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "server-only": "^0.0.1",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@eslint/eslintrc": "^3.3.6",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/node": "^22",
-    "@types/pg": "^8.15.5",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.0",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.17",
-    "tsx": "^4.20.3",
-    "typescript": "^5.9.2"
-  }
-}
 </file>
 
 <file path="postcss.config.mjs">
@@ -8003,6 +8039,429 @@ main()
   });
 </file>
 
+<file path="scripts/test-reconcile.mts">
+/**
+ * Reconcile engine ka test — asli Razorpay ki jagah nakli jawab dete hain.
+ *
+ * Chalane ka tareeka:  npx tsx scripts/test-reconcile.ts
+ *
+ * Sandbox se api.razorpay.com tak nahi pahuncha ja sakta, isliye axios ka
+ * adapter badal kar Razorpay ke jawab khud bana rahe hain. Iske alawa poora
+ * code wahi hai jo production me chalta hai — booking-service, DB, sab kuch.
+ */
+import "./load-env.ts";
+
+import { createRequire } from "node:module";
+
+// "server-only" Next ke bahar chalne par error phenkta hai — test ke liye khaali kar do
+const req = createRequire(import.meta.url);
+const serverOnly = req.resolve("server-only");
+req.cache[serverOnly] = {
+  id: serverOnly,
+  filename: serverOnly,
+  loaded: true,
+  exports: {},
+} as unknown as NodeModule;
+
+process.env.RAZORPAY_KEY_ID = "rzp_test_reconcile";
+process.env.RAZORPAY_KEY_SECRET = "secret_for_test";
+process.env.PAYMENT_PROVIDER = "razorpay";
+process.env.WHATSAPP_PROVIDER = "none";
+
+/* ---------------- Nakli Razorpay ---------------- */
+
+type Attempt = {
+  id: string;
+  status: string;
+  amount: number;
+  method?: string;
+  error_description?: string;
+  order_id?: string | null;
+  notes?: Record<string, string>;
+};
+
+/** order id → us order par hui payments ("boom" = network fail) */
+const ORDERS: Record<string, Attempt[] | "boom"> = {};
+/** order id → order ka apna record (receipt/notes) */
+const ORDER_META: Record<string, { receipt?: string; notes?: Record<string, string> }> = {};
+/** Razorpay ke "saare payments" wali list */
+let ALL_PAYMENTS: Attempt[] = [];
+let ALL_PAYMENTS_FAIL = false;
+
+// Razorpay SDK CommonJS axios use karta hai — usi instance ka adapter badalna hai
+const cjsAxios = req("axios");
+(cjsAxios.default ?? cjsAxios).defaults.adapter = async (config: {
+  url?: string;
+  [k: string]: unknown;
+}) => {
+  const url = String(config.url ?? "");
+  const ok = (data: unknown) => ({
+    data,
+    status: 200,
+    statusText: "OK",
+    headers: {},
+    config,
+  });
+
+  // GET /orders/{id}/payments
+  const op = url.match(/\/orders\/([^/?]+)\/payments/);
+  if (op) {
+    const items = ORDERS[op[1]];
+    if (items === "boom" || items === undefined) {
+      throw new Error("getaddrinfo ENOTFOUND api.razorpay.com");
+    }
+    return ok({ entity: "collection", count: items.length, items });
+  }
+
+  // GET /orders/{id}
+  const o = url.match(/\/orders\/([^/?]+)$/);
+  if (o) {
+    const meta = ORDER_META[o[1]];
+    if (!meta) throw new Error("order not found");
+    return ok({ id: o[1], ...meta });
+  }
+
+  // GET /payments/{id}
+  const p = url.match(/\/payments\/([^/?]+)$/);
+  if (p) {
+    const found = ALL_PAYMENTS.find((x) => x.id === p[1]);
+    if (!found) throw new Error("payment not found");
+    return ok(found);
+  }
+
+  // GET /payments?count=…
+  if (/\/payments(\?|$)/.test(url)) {
+    if (ALL_PAYMENTS_FAIL) throw new Error("401 unauthorized — key galat hai");
+    return ok({ entity: "collection", count: ALL_PAYMENTS.length, items: ALL_PAYMENTS });
+  }
+
+  throw new Error(`test: unexpected call ${url}`);
+};
+
+/* ---------------- Test ---------------- */
+
+const { db, pool } = await import("../src/db");
+const { bookings, packages, pujas } = await import("../src/db/schema");
+const {
+  reconcileBooking,
+  cleanupAbandoned,
+  attachPayment,
+  reviewGatewayPayments,
+  confirmAllPaidFromGateway,
+} = await import("../src/lib/payments/reconcile");
+const { eq } = await import("drizzle-orm");
+
+let pass = 0;
+let fail = 0;
+
+function check(name: string, got: unknown, want: unknown) {
+  if (got === want) {
+    console.log(`  ✅ ${name}`);
+    pass++;
+  } else {
+    console.log(`  ❌ ${name}\n       mila:    ${String(got)}\n       chahiye: ${String(want)}`);
+    fail++;
+  }
+}
+
+async function makeBooking(opts: {
+  orderId: string | null;
+  amount: number;
+  provider?: string;
+  ageHours?: number;
+}) {
+  const [puja] = await db.select({ id: pujas.id }).from(pujas).limit(1);
+  const [pkg] = await db
+    .select({ id: packages.id })
+    .from(packages)
+    .where(eq(packages.pujaId, puja.id))
+    .limit(1);
+
+  const created = new Date(Date.now() - (opts.ageHours ?? 0) * 3600_000);
+
+  const [row] = await db
+    .insert(bookings)
+    .values({
+      bookingCode: `TEST-${Math.random().toString(36).slice(2, 9).toUpperCase()}`,
+      pujaId: puja.id,
+      packageId: pkg.id,
+      devoteeName: "Test Devotee",
+      gotra: "Kashyap",
+      phone: "+919876500099",
+      amountInPaise: opts.amount,
+      packageAmountInPaise: opts.amount,
+      status: "PENDING_PAYMENT",
+      paymentStatus: "CREATED",
+      paymentProvider: opts.provider ?? "razorpay",
+      providerOrderId: opts.orderId,
+      whatsappOptIn: false,
+      createdAt: created,
+    })
+    .returning();
+
+  return row;
+}
+
+async function statusOf(id: string) {
+  const [r] = await db
+    .select({ s: bookings.status, p: bookings.paymentStatus, pid: bookings.providerPaymentId })
+    .from(bookings)
+    .where(eq(bookings.id, id))
+    .limit(1);
+  return r;
+}
+
+const TEST_PHONE = "+919876500099";
+
+// pichhle run ka kachra saaf
+await db.delete(bookings).where(eq(bookings.phone, TEST_PHONE));
+
+console.log("\n🧪 Reconcile engine test\n");
+
+/* 1. Paisa mil chuka hai → confirm */
+{
+  ORDERS["order_paid"] = [
+    { id: "pay_ok1", status: "captured", amount: 165100, method: "upi" },
+  ];
+  const b = await makeBooking({ orderId: "order_paid", amount: 165100 });
+  const r = await reconcileBooking(b, { force: true });
+  const after = await statusOf(b.id);
+
+  console.log("1) Razorpay: captured");
+  check("verdict", r.verdict, "confirmed-now");
+  check("booking status", after.s, "CONFIRMED");
+  check("payment status", after.p, "CAPTURED");
+  check("payment id save hua", after.pid, "pay_ok1");
+}
+
+/* 2. Koi koshish hi nahi hui → chhedо mat */
+{
+  ORDERS["order_empty"] = [];
+  const b = await makeBooking({ orderId: "order_empty", amount: 1100 });
+  const r = await reconcileBooking(b, { force: true });
+  const after = await statusOf(b.id);
+
+  console.log("\n2) Razorpay: koi payment attempt nahi (aapke ₹11 wale case)");
+  check("verdict", r.verdict, "no-attempt");
+  check("booking pending hi rahi", after.s, "PENDING_PAYMENT");
+}
+
+/* 3. Fail hui koshish */
+{
+  ORDERS["order_failed"] = [
+    { id: "pay_bad", status: "failed", amount: 1100, error_description: "Payment was not completed on time" },
+  ];
+  const b = await makeBooking({ orderId: "order_failed", amount: 1100 });
+  const r = await reconcileBooking(b, { force: true });
+  const after = await statusOf(b.id);
+
+  console.log("\n3) Razorpay: failed");
+  check("verdict", r.verdict, "failed");
+  check("booking pending hi rahi", after.s, "PENDING_PAYMENT");
+  check("payment status FAILED", after.p, "FAILED");
+}
+
+/* 4. Bank ka jawab baaki */
+{
+  ORDERS["order_created"] = [{ id: "pay_wait", status: "created", amount: 1100 }];
+  const b = await makeBooking({ orderId: "order_created", amount: 1100 });
+  const r = await reconcileBooking(b, { force: true });
+  check("\n4) verdict in-progress", (await Promise.resolve(r.verdict)), "in-progress");
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* 5. Raashi alag — kabhi confirm mat karo */
+{
+  ORDERS["order_short"] = [{ id: "pay_short", status: "captured", amount: 100 }];
+  const b = await makeBooking({ orderId: "order_short", amount: 165100 });
+  const r = await reconcileBooking(b, { force: true });
+  const after = await statusOf(b.id);
+
+  console.log("\n5) Razorpay: captured par ₹1 (raashi alag)");
+  check("verdict", r.verdict, "amount-mismatch");
+  check("booking confirm NAHI hui", after.s, "PENDING_PAYMENT");
+}
+
+/* 6. Gateway se baat hi nahi hui */
+{
+  ORDERS["order_boom"] = "boom";
+  const b = await makeBooking({ orderId: "order_boom", amount: 1100 });
+  const r = await reconcileBooking(b, { force: true });
+
+  console.log("\n6) Razorpay tak pahuncha hi nahi (network down)");
+  check("verdict", r.verdict, "error");
+  check("booking chhui tak nahi gayi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* 7. Order hi nahi bana tha */
+{
+  const b = await makeBooking({ orderId: null, amount: 1100 });
+  const r = await reconcileBooking(b, { force: true });
+  console.log("\n7) Order id hi nahi hai");
+  check("verdict", r.verdict, "no-order");
+}
+
+/* 8. Dobara chalane par kuch nahi badalta (idempotent) */
+{
+  ORDERS["order_twice"] = [{ id: "pay_twice", status: "captured", amount: 1100 }];
+  const b = await makeBooking({ orderId: "order_twice", amount: 1100 });
+
+  const [before] = await db.select({ n: pujas.seatsBooked }).from(pujas).where(eq(pujas.id, b.pujaId));
+  const r1 = await reconcileBooking(b, { force: true });
+  const fresh = (await db.select().from(bookings).where(eq(bookings.id, b.id)))[0];
+  const r2 = await reconcileBooking(fresh, { force: true });
+  const [after] = await db.select({ n: pujas.seatsBooked }).from(pujas).where(eq(pujas.id, b.pujaId));
+
+  console.log("\n8) Do baar chalaya (webhook + page load dono aa sakte hain)");
+  check("pehli baar changed", r1.changed, true);
+  check("doosri baar kuch nahi badla", r2.verdict, "already-done");
+  check("seat sirf 1 hi badhi", after.n - before.n, 1);
+}
+
+/* 9. Throttle — public page se baar-baar gateway na pite */
+{
+  ORDERS["order_throttle"] = [];
+  const b = await makeBooking({ orderId: "order_throttle", amount: 1100 });
+  await reconcileBooking(b); // force nahi
+  const again = await reconcileBooking(b); // turant dobara
+  console.log("\n9) Turant dobara check (throttle)");
+  check("doosri call gateway tak nahi gayi", again.attempts.length === 0 && again.verdict === "in-progress", true);
+}
+
+/* 10. Cleanup sirf saaf-saaf abandoned ko hataye */
+{
+  ORDERS["order_old_empty"] = [];
+  ORDERS["order_old_boom"] = "boom";
+  ORDERS["order_old_paid"] = [{ id: "pay_old", status: "captured", amount: 1100 }];
+
+  const dead = await makeBooking({ orderId: "order_old_empty", amount: 1100, ageHours: 40 });
+  const unknown = await makeBooking({ orderId: "order_old_boom", amount: 1100, ageHours: 40 });
+  const paid = await makeBooking({ orderId: "order_old_paid", amount: 1100, ageHours: 40 });
+
+  await cleanupAbandoned(6);
+
+  console.log("\n10) Purani adhuri bookings ki safai");
+  check("jiska payment hua hi nahi → CANCELLED", (await statusOf(dead.id)).s, "CANCELLED");
+  check("jiska jawab nahi mila → chhua nahi", (await statusOf(unknown.id)).s, "PENDING_PAYMENT");
+  check("jiska paisa aaya tha → CONFIRMED (cancel nahi!)", (await statusOf(paid.id)).s, "CONFIRMED");
+}
+
+/* ==================================================================
+   Gateway ki taraf se milaan — jab booking par order id hi na bachi ho
+   ================================================================== */
+
+console.log("\n─── Razorpay ki taraf se milaan ───");
+
+/* 11. Order id save hi nahi hui thi → receipt (bookingCode) se dhoondho */
+{
+  const b = await makeBooking({ orderId: null, amount: 1100 });
+  ORDER_META["order_lost"] = { receipt: b.bookingCode, notes: { bookingCode: b.bookingCode } };
+  ALL_PAYMENTS = [
+    { id: "pay_lost", status: "captured", amount: 1100, method: "upi", order_id: "order_lost" },
+  ];
+
+  const r = await attachPayment("pay_lost");
+  const after = await statusOf(b.id);
+  const [saved] = await db
+    .select({ o: bookings.providerOrderId })
+    .from(bookings)
+    .where(eq(bookings.id, b.id));
+
+  console.log("\n11) Booking par order id thi hi nahi (aapka case ho sakta hai)");
+  check("attach safal", r.ok, true);
+  check("booking confirm hui", after.s, "CONFIRMED");
+  check("payment id save hua", after.pid, "pay_lost");
+  check("order id ab bhar diya gaya", saved.o, "order_lost");
+}
+
+/* 12. Fail payment ko kabhi confirm mat karo */
+{
+  const b = await makeBooking({ orderId: "order_f2", amount: 1100 });
+  ORDER_META["order_f2"] = { receipt: b.bookingCode };
+  ALL_PAYMENTS = [
+    { id: "pay_f2", status: "failed", amount: 1100, order_id: "order_f2" },
+  ];
+
+  const r = await attachPayment("pay_f2");
+  console.log("\n12) Fail payment paste ki gayi");
+  check("mana kiya", r.ok, false);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* 13. Raashi alag ho to kabhi confirm mat karo */
+{
+  const b = await makeBooking({ orderId: "order_m2", amount: 165100 });
+  ORDER_META["order_m2"] = { receipt: b.bookingCode };
+  ALL_PAYMENTS = [
+    { id: "pay_m2", status: "captured", amount: 100, order_id: "order_m2" },
+  ];
+
+  const r = await attachPayment("pay_m2");
+  console.log("\n13) ₹1 aaya par booking ₹1,651 ki hai");
+  check("mana kiya", r.ok, false);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* 14. Galat payment id */
+{
+  const r = await attachPayment("kuch-bhi");
+  console.log("\n14) Galat format ki payment ID");
+  check("mana kiya", r.ok, false);
+}
+
+/* 15. Poori list ka milaan + ek saath sabko confirm karna */
+{
+  const b1 = await makeBooking({ orderId: "order_g1", amount: 1100 });
+  const b2 = await makeBooking({ orderId: "order_g2", amount: 1100 });
+  const b3 = await makeBooking({ orderId: "order_g3", amount: 1100 });
+  ORDER_META["order_g1"] = { receipt: b1.bookingCode };
+  ORDER_META["order_g2"] = { receipt: b2.bookingCode };
+  ORDER_META["order_g3"] = { receipt: b3.bookingCode };
+
+  ALL_PAYMENTS = [
+    { id: "pay_g1", status: "captured", amount: 1100, method: "upi", order_id: "order_g1" },
+    { id: "pay_g2", status: "captured", amount: 1100, method: "upi", order_id: "order_g2" },
+    { id: "pay_g3", status: "failed", amount: 1100, method: "upi", order_id: "order_g3" },
+    { id: "pay_gx", status: "captured", amount: 5000, method: "card", order_id: "order_unknown" },
+  ];
+
+  const review = await reviewGatewayPayments(25);
+  console.log("\n15) Razorpay ki poori list ka milaan");
+  check("list mil gayi", review.ok, true);
+
+  if (review.ok) {
+    const actionable = review.rows.filter((r) => r.actionable).map((r) => r.id).sort();
+    check("sirf 2 payment par kaam baaki", actionable.join(","), "pay_g1,pay_g2");
+    const orphan = review.rows.find((r) => r.id === "pay_gx");
+    check("anjaan payment ki booking nahi mili", orphan?.bookingId, null);
+    const failed = review.rows.find((r) => r.id === "pay_g3");
+    check("fail payment actionable nahi", failed?.actionable, false);
+  }
+
+  const { confirmed } = await confirmAllPaidFromGateway(25);
+  check("dono ek saath confirm hue", confirmed, 2);
+  check("b1 confirm", (await statusOf(b1.id)).s, "CONFIRMED");
+  check("b2 confirm", (await statusOf(b2.id)).s, "CONFIRMED");
+  check("b3 (fail wali) pending hi rahi", (await statusOf(b3.id)).s, "PENDING_PAYMENT");
+}
+
+/* 16. Razorpay se list hi na mile to saaf error mile, crash na ho */
+{
+  ALL_PAYMENTS_FAIL = true;
+  const review = await reviewGatewayPayments(25);
+  console.log("\n16) Razorpay keys galat / list nahi mili");
+  check("ok=false mila", review.ok, false);
+  ALL_PAYMENTS_FAIL = false;
+}
+
+/* ---------------- Safai ---------------- */
+await db.delete(bookings).where(eq(bookings.phone, "+919876500099"));
+
+console.log(`\n${fail === 0 ? "✨" : "⚠️"}  ${pass} pass, ${fail} fail\n`);
+await pool.end();
+process.exit(fail === 0 ? 0 : 1);
+</file>
+
 <file path="src/app/(site)/contact/page.tsx">
 import type { Metadata } from "next";
 import ContactForm from "@/components/ContactForm";
@@ -8806,52 +9265,6 @@ export default async function AdminSettingsPage() {
 }
 </file>
 
-<file path="src/app/admin/(panel)/AdminNav.tsx">
-"use client";
-
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { cn } from "@/lib/utils";
-
-const LINKS = [
-  { href: "/admin", label: "Dashboard", exact: true },
-  { href: "/admin/bookings", label: "Bookings" },
-  { href: "/admin/pujas", label: "Pujas" },
-  { href: "/admin/addons", label: "Add-ons" },
-  { href: "/admin/messages", label: "Messages" },
-  { href: "/admin/settings", label: "Settings" },
-];
-
-export default function AdminNav() {
-  const pathname = usePathname();
-
-  return (
-    <nav className="border-t border-saffron-50 bg-white">
-      <ul className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-4 sm:px-6">
-        {LINKS.map((l) => {
-          const active = l.exact ? pathname === l.href : pathname.startsWith(l.href);
-          return (
-            <li key={l.href}>
-              <Link
-                href={l.href}
-                className={cn(
-                  "-mb-px block whitespace-nowrap border-b-2 px-3 py-2.5 text-[13.5px] font-semibold transition",
-                  active
-                    ? "border-saffron-600 text-saffron-700"
-                    : "border-transparent text-ink/55 hover:text-maroon-800",
-                )}
-              >
-                {l.label}
-              </Link>
-            </li>
-          );
-        })}
-      </ul>
-    </nav>
-  );
-}
-</file>
-
 <file path="src/app/api/payment/paytm/callback/route.ts">
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
@@ -9147,195 +9560,6 @@ export async function POST(req: Request) {
   await confirmBookingPaid({ bookingId: booking.id, providerPaymentId: paymentId });
 
   return NextResponse.json({ ok: true, bookingCode: booking.bookingCode });
-}
-</file>
-
-<file path="src/app/api/payment/webhook/route.ts">
-import { NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings } from "@/db/schema";
-import { verifyWebhookSignature } from "@/lib/payments/razorpay";
-import { confirmBookingPaid, markBookingFailed } from "@/lib/booking-service";
-
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-/**
- * Razorpay webhook.
- *
- * Ye endpoint bahar se aata hai isliye CSRF check nahi hota —
- * iski jagah HMAC signature verify hota hai. Bina sahi signature ke
- * koi bhi request reject ho jati hai.
- *
- * Razorpay Dashboard > Settings > Webhooks:
- *   URL:    https://aapka-domain.com/api/payment/webhook
- *   Events: payment.captured, payment.failed, order.paid
- */
-export async function POST(req: Request) {
-  const raw = await req.text();
-  const signature = req.headers.get("x-razorpay-signature");
-
-  if (!verifyWebhookSignature(raw, signature)) {
-    console.warn("[webhook] invalid signature");
-    return NextResponse.json({ ok: false }, { status: 401 });
-  }
-
-  let event: {
-    event?: string;
-    payload?: {
-      payment?: { entity?: { id?: string; order_id?: string; amount?: number } };
-      order?: { entity?: { id?: string } };
-    };
-  };
-
-  try {
-    event = JSON.parse(raw);
-  } catch {
-    return NextResponse.json({ ok: false }, { status: 400 });
-  }
-
-  const payment = event.payload?.payment?.entity;
-  const orderId = payment?.order_id ?? event.payload?.order?.entity?.id;
-
-  if (!orderId) return NextResponse.json({ ok: true, ignored: true });
-
-  const [booking] = await db
-    .select()
-    .from(bookings)
-    .where(eq(bookings.providerOrderId, orderId))
-    .limit(1);
-
-  if (!booking) return NextResponse.json({ ok: true, ignored: true });
-
-  switch (event.event) {
-    case "payment.captured":
-    case "order.paid": {
-      // amount cross-check
-      if (payment?.amount != null && Number(payment.amount) !== booking.amountInPaise) {
-        console.warn("[webhook] amount mismatch for", booking.bookingCode);
-        return NextResponse.json({ ok: true, ignored: true });
-      }
-      await confirmBookingPaid({
-        bookingId: booking.id,
-        providerPaymentId: payment?.id ?? null,
-      });
-      break;
-    }
-
-    case "payment.failed": {
-      await markBookingFailed(booking.id);
-      break;
-    }
-
-    default:
-      break;
-  }
-
-  return NextResponse.json({ ok: true });
-}
-</file>
-
-<file path="src/app/api/track/route.ts">
-import { NextResponse } from "next/server";
-import { and, desc, eq, ne } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings, pujas, temples } from "@/db/schema";
-import { trackSchema } from "@/lib/validation";
-import { guardPublicPost, jsonError } from "@/lib/guard";
-import { clientIp, rateLimit } from "@/lib/rate-limit";
-import { normalizePhone } from "@/lib/utils";
-
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-/**
- * Booking tracking.
- *
- * Sirf mobile number se saari bookings mil jati hain — user ke liye sabse aasan.
- * Privacy ke liye is list me sirf puja ka naam, tithi aur status bhejte hain;
- * naam, gotra aur pata yahan nahi aate.
- *
- * Number guessing rokne ke liye sakht rate limit hai (10 min me 8 koshish).
- */
-export async function POST(req: Request) {
-  const csrf = guardPublicPost(req);
-  if (csrf) return csrf;
-
-  const ip = clientIp(req);
-  const limit = rateLimit(`track:${ip}`, {
-    limit: 8,
-    windowMs: 10 * 60_000,
-    blockMs: 20 * 60_000,
-  });
-  if (!limit.ok) {
-    return jsonError("Bahut zyada koshishein. Thodi der baad try karein.", 429);
-  }
-
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return jsonError("Invalid request.", 400);
-  }
-
-  const parsed = trackSchema.safeParse(body);
-  if (!parsed.success) return jsonError("Sahi 10-digit mobile number daalein.", 400);
-
-  const phone = normalizePhone(parsed.data.phone);
-  if (!phone) return jsonError("Sahi 10-digit mobile number daalein.", 400);
-
-  const code = parsed.data.bookingCode?.trim().toUpperCase();
-
-  /* ---- Agar Booking ID bhi diya hai to seedha wahi booking ---- */
-  if (code) {
-    const [row] = await db
-      .select({ code: bookings.bookingCode })
-      .from(bookings)
-      .where(and(eq(bookings.bookingCode, code), eq(bookings.phone, phone)))
-      .limit(1);
-
-    if (!row) return jsonError("not_found", 404);
-    return NextResponse.json({ ok: true, bookingCode: row.code });
-  }
-
-  /* ---- Sirf number: uski saari bookings ki list ---- */
-  const rows = await db
-    .select({
-      bookingCode: bookings.bookingCode,
-      status: bookings.status,
-      amountInPaise: bookings.amountInPaise,
-      createdAt: bookings.createdAt,
-      pujaTitleEn: pujas.titleEn,
-      pujaTitleHi: pujas.titleHi,
-      pujaDate: pujas.pujaDate,
-      artKey: pujas.artKey,
-      imageUrl: pujas.imageUrl,
-      templeNameEn: temples.nameEn,
-      templeNameHi: temples.nameHi,
-    })
-    .from(bookings)
-    .innerJoin(pujas, eq(bookings.pujaId, pujas.id))
-    .leftJoin(temples, eq(pujas.templeId, temples.id))
-    .where(and(eq(bookings.phone, phone), ne(bookings.status, "CANCELLED")))
-    .orderBy(desc(bookings.createdAt))
-    .limit(30);
-
-  if (rows.length === 0) return jsonError("not_found", 404);
-
-  // Jo abhi baaki hain wo pehle, poori ho chuki neeche
-  const DONE = new Set(["COMPLETED", "REFUNDED"]);
-  const upcoming = rows.filter((r) => !DONE.has(r.status));
-  const past = rows.filter((r) => DONE.has(r.status));
-
-  return NextResponse.json({
-    ok: true,
-    bookings: [...upcoming, ...past].map((r) => ({
-      ...r,
-      pujaDate: r.pujaDate.toISOString(),
-      createdAt: r.createdAt.toISOString(),
-    })),
-  });
 }
 </file>
 
@@ -10232,101 +10456,626 @@ export async function createPaymentSession(params: {
 export { paytm, razorpay };
 </file>
 
-<file path="src/lib/payments/razorpay.ts">
+<file path="src/lib/payments/reconcile.ts">
 import "server-only";
 
-import { createHmac, timingSafeEqual } from "node:crypto";
-import Razorpay from "razorpay";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { bookings } from "@/db/schema";
+import { confirmBookingPaid, markBookingFailed } from "../booking-service";
+import * as razorpay from "./razorpay";
+import * as paytm from "./paytm";
 
+/**
+ * ------------------------------------------------------------------
+ *  Reconciliation — "payment ho gaya par booking pending dikh rahi hai"
+ *  ka pakka ilaaj.
+ * ------------------------------------------------------------------
+ *
+ * Booking confirm hone ke teen raaste hain:
+ *   1. Browser callback  — user payment ke baad wapas site par aata hai
+ *   2. Webhook           — Razorpay khud humein batata hai
+ *   3. Reconcile (ye)    — hum khud gateway se poochhte hain
+ *
+ * Pehle do raaste toot sakte hain: mobile par UPI app se wapas na aana,
+ * net kat jana, webhook dashboard me register na hona, ya webhook secret
+ * galat hona. Isliye teesra raasta sabse zaroori hai — jab bhi koi
+ * pending booking dikhayi jati hai (booking page, track page, admin),
+ * hum seedha gateway se poochh lete hain ki paisa aaya ya nahi.
+ *
+ * Faisla hamesha gateway ke jawab se hota hai, browser se aayi kisi
+ * jaankari se nahi.
+ */
 
-export function isRazorpayLive(): boolean {
-  return Boolean(
-    process.env.RAZORPAY_KEY_ID?.trim() && process.env.RAZORPAY_KEY_SECRET?.trim(),
-  );
-}
+export type ReconcileVerdict =
+  | "already-done" // booking pehle hi confirm hai
+  | "confirmed-now" // gateway ne paisa mila bataya → abhi confirm kiya
+  | "in-progress" // payment shuru hui hai, bank ka jawab baaki hai
+  | "no-attempt" // is order par koi payment koshish hui hi nahi
+  | "failed" // koshish hui par fail ho gayi
+  | "amount-mismatch" // paisa aaya par galat raashi — haath se dekhna padega
+  | "no-order" // order hi nahi bana (gateway tak baat nahi pahunchi)
+  | "not-configured" // is provider ki keys server par nahi hain
+  | "demo" // demo mode ki booking
+  | "error"; // gateway se baat nahi ho payi
 
-let client: Razorpay | null = null;
-
-function getClient(): Razorpay {
-  if (!isRazorpayLive()) {
-    throw new Error("Razorpay keys .env me set nahi hain.");
-  }
-  if (!client) {
-    client = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID!,
-      key_secret: process.env.RAZORPAY_KEY_SECRET!,
-    });
-  }
-  return client;
-}
-
-export type CreatedOrder = {
-  orderId: string;
-  amount: number;
-  currency: string;
-  keyId: string;
+export type ReconcileReport = {
+  bookingId: string;
+  bookingCode: string;
+  verdict: ReconcileVerdict;
+  changed: boolean;
+  /** Admin ko dikhane laayak seedhi baat */
+  message: string;
+  provider: string;
+  orderId: string | null;
+  paymentId: string | null;
+  attempts: razorpay.OrderPayment[];
 };
 
-export async function createOrder(params: {
-  amountInPaise: number;
-  receipt: string;
-  notes?: Record<string, string>;
-}): Promise<CreatedOrder> {
-  const order = await getClient().orders.create({
-    amount: params.amountInPaise,
-    currency: "INR",
-    receipt: params.receipt.slice(0, 40),
-    payment_capture: true,
-    notes: params.notes,
-  });
+type BookingRow = typeof bookings.$inferSelect;
+
+/* ------------------------------------------------------------------ */
+/*  Throttle — public page se baar-baar gateway na pitein             */
+/* ------------------------------------------------------------------ */
+
+const lastChecked = new Map<string, number>();
+const THROTTLE_MS = 15_000;
+
+function throttled(bookingId: string, now: number): boolean {
+  const prev = lastChecked.get(bookingId);
+  if (prev && now - prev < THROTTLE_MS) return true;
+  lastChecked.set(bookingId, now);
+  // map ko chhota rakho
+  if (lastChecked.size > 500) {
+    for (const [k, v] of lastChecked) {
+      if (now - v > 10 * 60_000) lastChecked.delete(k);
+    }
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Ek booking                                                         */
+/* ------------------------------------------------------------------ */
+
+export async function reconcileBooking(
+  booking: BookingRow,
+  opts?: { force?: boolean },
+): Promise<ReconcileReport> {
+  const base = {
+    bookingId: booking.id,
+    bookingCode: booking.bookingCode,
+    changed: false,
+    provider: booking.paymentProvider,
+    orderId: booking.providerOrderId,
+    paymentId: booking.providerPaymentId,
+    attempts: [] as razorpay.OrderPayment[],
+  };
+
+  if (booking.status !== "PENDING_PAYMENT") {
+    return { ...base, verdict: "already-done", message: "Booking pehle hi confirm hai." };
+  }
+
+  if (booking.paymentProvider === "none") {
+    return {
+      ...base,
+      verdict: "demo",
+      message: "Demo mode ki booking — koi payment gateway juda nahi tha.",
+    };
+  }
+
+  if (!booking.providerOrderId) {
+    return {
+      ...base,
+      verdict: "no-order",
+      message:
+        "Gateway par order bana hi nahi tha — payment window shayad khuli hi nahi. User ko dobara book karne ko kahein.",
+    };
+  }
+
+  if (!opts?.force && throttled(booking.id, Date.now())) {
+    return {
+      ...base,
+      verdict: "in-progress",
+      message: "Abhi-abhi check kiya gaya tha, thodi der me dobara.",
+    };
+  }
+
+  try {
+    if (booking.paymentProvider === "razorpay") {
+      return await reconcileRazorpay(booking, base);
+    }
+    if (booking.paymentProvider === "paytm") {
+      return await reconcilePaytm(booking, base);
+    }
+    return { ...base, verdict: "error", message: `Anjaan provider: ${booking.paymentProvider}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[reconcile] gateway error for", booking.bookingCode, msg);
+    return {
+      ...base,
+      verdict: "error",
+      message: `Gateway se baat nahi ho payi: ${msg}`,
+    };
+  }
+}
+
+async function reconcileRazorpay(
+  booking: BookingRow,
+  base: Omit<ReconcileReport, "verdict" | "message">,
+): Promise<ReconcileReport> {
+  if (!razorpay.isRazorpayLive()) {
+    return {
+      ...base,
+      verdict: "not-configured",
+      message:
+        "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET server par set nahi hain — isliye check nahi ho sakta.",
+    };
+  }
+
+  const attempts = await razorpay.fetchOrderPayments(booking.providerOrderId!);
+  const withAttempts = { ...base, attempts };
+
+  const paid = attempts.find(
+    (p) => p.status === "captured" || p.status === "authorized",
+  );
+
+  if (paid) {
+    if (paid.amount !== booking.amountInPaise) {
+      console.warn("[reconcile] amount mismatch", booking.bookingCode, paid.amount);
+      return {
+        ...withAttempts,
+        verdict: "amount-mismatch",
+        paymentId: paid.id,
+        message: `Gateway par ₹${(paid.amount / 100).toFixed(2)} mila par booking ₹${(
+          booking.amountInPaise / 100
+        ).toFixed(2)} ki hai. Khud dekh kar faisla karein.`,
+      };
+    }
+
+    const { changed } = await confirmBookingPaid({
+      bookingId: booking.id,
+      providerPaymentId: paid.id,
+    });
+
+    return {
+      ...withAttempts,
+      verdict: "confirmed-now",
+      changed,
+      paymentId: paid.id,
+      message:
+        paid.status === "captured"
+          ? "Paisa mil chuka tha — booking ab confirm kar di gayi."
+          : "Payment authorize ho chuki thi — booking confirm kar di gayi (capture Razorpay karega).",
+    };
+  }
+
+  const pendingAttempt = attempts.find(
+    (p) => p.status === "created" || p.status === "pending",
+  );
+  if (pendingAttempt) {
+    return {
+      ...withAttempts,
+      verdict: "in-progress",
+      paymentId: pendingAttempt.id,
+      message: "Payment shuru hui hai, bank ka jawab abhi baaki hai. Thodi der me dobara dekhein.",
+    };
+  }
+
+  const failed = attempts.find((p) => p.status === "failed");
+  if (failed) {
+    await markBookingFailed(booking.id);
+    return {
+      ...withAttempts,
+      verdict: "failed",
+      paymentId: failed.id,
+      message: `Payment fail hui thi${
+        failed.errorDescription ? ` — ${failed.errorDescription}` : ""
+      }. Paisa nahi kata. User dobara koshish kar sakta hai.`,
+    };
+  }
 
   return {
-    orderId: order.id,
-    amount: Number(order.amount),
-    currency: order.currency,
-    keyId: process.env.RAZORPAY_KEY_ID!,
+    ...withAttempts,
+    verdict: "no-attempt",
+    message:
+      "Razorpay par is order ke liye ek bhi payment koshish darj nahi hai — matlab paisa kata hi nahi. User ne payment window band kar di hogi.",
   };
 }
 
-/** Checkout ke baad browser se aaya signature verify karo */
-export function verifyCheckoutSignature(input: {
-  orderId: string;
-  paymentId: string;
-  signature: string;
-}): boolean {
-  const secret = process.env.RAZORPAY_KEY_SECRET;
-  if (!secret) return false;
-
-  const expected = createHmac("sha256", secret)
-    .update(`${input.orderId}|${input.paymentId}`)
-    .digest("hex");
-
-  return safeCompareHex(expected, input.signature);
-}
-
-/** Razorpay webhook ka signature verify karo (raw body chahiye) */
-export function verifyWebhookSignature(rawBody: string, signature: string | null): boolean {
-  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-  if (!secret || !signature) return false;
-
-  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-  return safeCompareHex(expected, signature);
-}
-
-/** Payment ki asli sthiti Razorpay se confirm karo (bharosa server par) */
-export async function fetchPayment(paymentId: string) {
-  return getClient().payments.fetch(paymentId);
-}
-
-function safeCompareHex(a: string, b: string): boolean {
-  try {
-    const ab = Buffer.from(a, "hex");
-    const bb = Buffer.from(b, "hex");
-    if (ab.length === 0 || ab.length !== bb.length) return false;
-    return timingSafeEqual(ab, bb);
-  } catch {
-    return false;
+async function reconcilePaytm(
+  booking: BookingRow,
+  base: Omit<ReconcileReport, "verdict" | "message">,
+): Promise<ReconcileReport> {
+  if (!paytm.isPaytmLive()) {
+    return {
+      ...base,
+      verdict: "not-configured",
+      message: "Paytm keys server par set nahi hain — isliye check nahi ho sakta.",
+    };
   }
+
+  const status = await paytm.fetchTransactionStatus(booking.providerOrderId!);
+  const amountOk =
+    status.amountInPaise === null || status.amountInPaise === booking.amountInPaise;
+
+  if (status.success && !amountOk) {
+    return {
+      ...base,
+      verdict: "amount-mismatch",
+      paymentId: status.txnId,
+      message: `Paytm par raashi alag hai (${status.amountInPaise} paise). Khud dekh kar faisla karein.`,
+    };
+  }
+
+  if (status.success) {
+    const { changed } = await confirmBookingPaid({
+      bookingId: booking.id,
+      providerPaymentId: status.txnId,
+    });
+    return {
+      ...base,
+      verdict: "confirmed-now",
+      changed,
+      paymentId: status.txnId,
+      message: "Paytm par payment safal thi — booking ab confirm kar di gayi.",
+    };
+  }
+
+  if (status.pending) {
+    return {
+      ...base,
+      verdict: "in-progress",
+      message: `Paytm: ${status.resultMsg || "bank ka jawab baaki hai"}.`,
+    };
+  }
+
+  await markBookingFailed(booking.id);
+  return {
+    ...base,
+    verdict: "failed",
+    message: `Paytm: ${status.resultMsg || "payment safal nahi hui"}. Paisa nahi kata.`,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Aasan wrappers                                                     */
+/* ------------------------------------------------------------------ */
+
+export async function reconcileBookingById(
+  bookingId: string,
+  opts?: { force?: boolean },
+): Promise<ReconcileReport | null> {
+  const [row] = await db.select().from(bookings).where(eq(bookings.id, bookingId)).limit(1);
+  if (!row) return null;
+  return reconcileBooking(row, opts);
+}
+
+/**
+ * Booking page khulte hi chalta hai. Chup-chaap — agar gateway se baat
+ * na ho paye to user ko kuch nahi dikhta, page normal khulta hai.
+ */
+export async function reconcileByBookingCode(code: string): Promise<ReconcileReport | null> {
+  const [row] = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.bookingCode, code.toUpperCase()),
+        eq(bookings.status, "PENDING_PAYMENT"),
+      ),
+    )
+    .limit(1);
+
+  if (!row) return null;
+  return reconcileBooking(row).catch(() => null);
+}
+
+/**
+ * Track page: ek number ki jitni bhi bookings pending hain (haal hi ki),
+ * sabko gateway se check kar lo — taaki list me sahi status dikhe.
+ */
+export async function reconcilePendingForPhone(phone: string, limit = 6): Promise<void> {
+  const rows = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.phone, phone),
+        eq(bookings.status, "PENDING_PAYMENT"),
+        sql`${bookings.createdAt} > now() - interval '14 days'`,
+      ),
+    )
+    .orderBy(desc(bookings.createdAt))
+    .limit(limit);
+
+  if (rows.length === 0) return;
+
+  await Promise.all(rows.map((r) => reconcileBooking(r).catch(() => null)));
+}
+
+/** Admin page ke liye — saari pending bookings ek saath */
+export async function reconcileAllPending(limit = 25): Promise<ReconcileReport[]> {
+  const rows = await db
+    .select()
+    .from(bookings)
+    .where(eq(bookings.status, "PENDING_PAYMENT"))
+    .orderBy(desc(bookings.createdAt))
+    .limit(limit);
+
+  const out: ReconcileReport[] = [];
+  for (const row of rows) {
+    out.push(await reconcileBooking(row, { force: true }));
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Ulta milaan — Razorpay ki taraf se                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Booking dhoondne ke teen raaste (ek fail ho to doosra).
+ *
+ *  1. providerOrderId se — sidha rasta
+ *  2. order ke `receipt` se — humne receipt me bookingCode hi bhara tha
+ *  3. order ke `notes.bookingCode` se
+ *
+ * Teen raaste isliye ki agar kisi booking par order id save hone se pehle
+ * hi kuch gadbad ho gayi ho, to bhi paisa apni booking tak pahunch jaye.
+ */
+async function findBookingForPayment(orderId: string | null, hint: string | null) {
+  if (orderId) {
+    const [byOrder] = await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.providerOrderId, orderId))
+      .limit(1);
+    if (byOrder) return byOrder;
+  }
+
+  const codes: string[] = [];
+  if (hint) codes.push(hint.trim().toUpperCase());
+
+  if (orderId && razorpay.isRazorpayLive()) {
+    try {
+      const order = (await razorpay.fetchOrder(orderId)) as unknown as {
+        receipt?: string | null;
+        notes?: Record<string, string> | null;
+      };
+      if (order?.receipt) codes.push(String(order.receipt).trim().toUpperCase());
+      if (order?.notes?.bookingCode) {
+        codes.push(String(order.notes.bookingCode).trim().toUpperCase());
+      }
+    } catch {
+      /* order na mile to bhi aage badho */
+    }
+  }
+
+  for (const code of Array.from(new Set(codes)).filter(Boolean)) {
+    const [byCode] = await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.bookingCode, code))
+      .limit(1);
+    if (byCode) return byCode;
+  }
+
+  return null;
+}
+
+export type GatewayPaymentRow = razorpay.RecentPayment & {
+  bookingId: string | null;
+  bookingCode: string | null;
+  bookingStatus: string | null;
+  /** Kya is payment ke liye humein kuch karna chahiye? */
+  actionable: boolean;
+  note: string;
+};
+
+/**
+ * Razorpay par aayi pichhli payments uthao aur har ek ko apni booking se jodo.
+ *
+ * Ye "ulta" milaan hai — pending bookings se shuru karne ke bajaye seedha
+ * gateway se shuru hota hai. Isse wo payment bhi pakdi jati hai jiski booking
+ * par order id kisi wajah se save hi nahi hui thi.
+ */
+export async function reviewGatewayPayments(
+  count = 25,
+): Promise<{ ok: true; rows: GatewayPaymentRow[] } | { ok: false; error: string }> {
+  if (!razorpay.isRazorpayLive()) {
+    return { ok: false, error: "Razorpay keys server par set nahi hain." };
+  }
+
+  let payments: razorpay.RecentPayment[];
+  try {
+    payments = await razorpay.fetchRecentPayments(count);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
+    console.error("[reconcile] payments.all failed:", err);
+    return { ok: false, error: `Razorpay se payments list nahi mili: ${msg}` };
+  }
+
+  const rows: GatewayPaymentRow[] = [];
+
+  for (const p of payments) {
+    const booking = await findBookingForPayment(p.orderId, p.bookingCodeHint).catch(
+      () => null,
+    );
+
+    const paid = p.status === "captured" || p.status === "authorized";
+
+    let note: string;
+    let actionable = false;
+
+    if (!booking) {
+      note = paid
+        ? "⚠️ Is payment ki booking humare database me nahi mili. Order ID neeche diya hai — Bookings me dhoondh kar dekhein."
+        : "Is payment ki koi booking nahi mili (payment safal bhi nahi thi).";
+    } else if (booking.status !== "PENDING_PAYMENT") {
+      note = "✓ Booking pehle se confirm hai.";
+    } else if (!paid) {
+      note = `Payment ${p.status} thi — booking pending rehna sahi hai.`;
+    } else if (p.amount !== booking.amountInPaise) {
+      note = `⚠️ Raashi alag hai — payment ₹${(p.amount / 100).toFixed(2)}, booking ₹${(
+        booking.amountInPaise / 100
+      ).toFixed(2)}.`;
+    } else {
+      note = "💰 Paisa aa chuka hai par booking pending hai — “Jodein aur confirm karein” dabayein.";
+      actionable = true;
+    }
+
+    rows.push({
+      ...p,
+      bookingId: booking?.id ?? null,
+      bookingCode: booking?.bookingCode ?? null,
+      bookingStatus: booking?.status ?? null,
+      actionable,
+      note,
+    });
+  }
+
+  return { ok: true, rows };
+}
+
+/**
+ * Ek payment ID ko uski booking se jod kar confirm karna.
+ *
+ * Amount aur status Razorpay se hi liye jate hain — browser ya admin ke
+ * bataye hue kisi bhi aankde par bharosa nahi.
+ */
+export async function attachPayment(
+  paymentIdRaw: string,
+): Promise<{ ok: boolean; message: string; bookingCode?: string }> {
+  const paymentId = paymentIdRaw.trim();
+  if (!/^pay_[A-Za-z0-9]+$/.test(paymentId)) {
+    return { ok: false, message: "Payment ID aisi honi chahiye: pay_XXXXXXXXXXXX" };
+  }
+  if (!razorpay.isRazorpayLive()) {
+    return { ok: false, message: "Razorpay keys server par set nahi hain." };
+  }
+
+  let payment: {
+    status?: string;
+    amount?: number | string;
+    order_id?: string | null;
+    notes?: Record<string, string> | null;
+  };
+  try {
+    payment = (await razorpay.fetchPayment(paymentId)) as never;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
+    return { ok: false, message: `Razorpay par ye payment nahi mili: ${msg}` };
+  }
+
+  const status = String(payment.status ?? "");
+  if (status !== "captured" && status !== "authorized") {
+    return {
+      ok: false,
+      message: `Razorpay kehta hai ye payment "${status}" hai — paisa aaya hi nahi, isliye booking confirm nahi ki ja sakti.`,
+    };
+  }
+
+  const orderId = payment.order_id ?? null;
+  const booking = await findBookingForPayment(orderId, payment.notes?.bookingCode ?? null);
+
+  if (!booking) {
+    return {
+      ok: false,
+      message: `Payment to safal hai, par iski booking nahi mili. Order ID: ${orderId ?? "—"}. Bookings page par is order ID se dhoondh kar dekhein.`,
+    };
+  }
+
+  if (booking.status !== "PENDING_PAYMENT") {
+    return {
+      ok: true,
+      bookingCode: booking.bookingCode,
+      message: `Booking ${booking.bookingCode} pehle se confirm hai — kuch badla nahi.`,
+    };
+  }
+
+  if (Number(payment.amount) !== booking.amountInPaise) {
+    return {
+      ok: false,
+      bookingCode: booking.bookingCode,
+      message: `Raashi match nahi kar rahi — payment ₹${(
+        Number(payment.amount) / 100
+      ).toFixed(2)}, booking ${booking.bookingCode} ₹${(booking.amountInPaise / 100).toFixed(
+        2,
+      )}. Khud dekh kar faisla karein.`,
+    };
+  }
+
+  // order id kabhi save na hui ho to ab bhar do
+  if (orderId && !booking.providerOrderId) {
+    await db
+      .update(bookings)
+      .set({ providerOrderId: orderId })
+      .where(eq(bookings.id, booking.id))
+      .catch(() => null);
+  }
+
+  await confirmBookingPaid({ bookingId: booking.id, providerPaymentId: paymentId });
+
+  return {
+    ok: true,
+    bookingCode: booking.bookingCode,
+    message: `✓ Booking ${booking.bookingCode} confirm kar di gayi.`,
+  };
+}
+
+/** Razorpay par jitni bhi paid-par-pending payments hain, sabko ek saath confirm karo */
+export async function confirmAllPaidFromGateway(
+  count = 25,
+): Promise<{ confirmed: number; error?: string }> {
+  const review = await reviewGatewayPayments(count);
+  if (!review.ok) return { confirmed: 0, error: review.error };
+
+  let confirmed = 0;
+  for (const row of review.rows) {
+    if (!row.actionable) continue;
+    const r = await attachPayment(row.id).catch(() => null);
+    if (r?.ok) confirmed++;
+  }
+  return { confirmed };
+}
+
+/**
+ * Purani adhuri bookings hatana.
+ *
+ * Sirf wahi hatti hain jinke baare me gateway ne saaf kaha ho ki koi
+ * payment nahi hui ("no-attempt" ya "failed") aur jo kaafi purani ho
+ * chuki hain. Jinka jawab nahi mila unhein haath nahi lagate — kabhi
+ * bhi kisi asli payment wali booking ko cancel nahi karna hai.
+ */
+export async function cleanupAbandoned(olderThanHours = 6): Promise<number> {
+  const rows = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.status, "PENDING_PAYMENT"),
+        lt(bookings.createdAt, new Date(Date.now() - olderThanHours * 3600_000)),
+      ),
+    )
+    .limit(100);
+
+  const doomed: string[] = [];
+  for (const row of rows) {
+    const report = await reconcileBooking(row, { force: true }).catch(() => null);
+    if (report && (report.verdict === "no-attempt" || report.verdict === "failed")) {
+      doomed.push(row.id);
+    }
+  }
+
+  if (doomed.length === 0) return 0;
+
+  await db
+    .update(bookings)
+    .set({ status: "CANCELLED", updatedAt: new Date() })
+    .where(and(inArray(bookings.id, doomed), eq(bookings.status, "PENDING_PAYMENT")));
+
+  return doomed.length;
 }
 </file>
 
@@ -10761,313 +11510,49 @@ export function maskPhone(phone: string): string {
 }
 </file>
 
-<file path="src/app/(site)/booking/[code]/page.tsx">
-import type { Metadata } from "next";
-import Link from "next/link";
-import { notFound } from "next/navigation";
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { bookingEvents } from "@/db/schema";
-import PujaImage from "@/components/PujaImage";
-import BookingTimeline from "@/components/BookingTimeline";
-import { getLangDict } from "@/lib/lang-server";
-import { pick } from "@/lib/i18n";
-import { formatDate, formatINR, maskPhone } from "@/lib/utils";
-import { siteConfig } from "@/lib/env";
-import { getBookingAddons, getBookingByCode } from "@/lib/queries";
-
-export const metadata: Metadata = {
-  title: "Booking Status",
-  robots: { index: false, follow: false },
-};
-
-type Params = Promise<{ code: string }>;
-type Search = Promise<{ paid?: string; pending?: string; failed?: string }>;
-
-export default async function BookingStatusPage({
-  params,
-  searchParams,
-}: {
-  params: Params;
-  searchParams: Search;
-}) {
-  const { code } = await params;
-  const sp = await searchParams;
-  const { lang, t } = await getLangDict();
-
-  const data = await getBookingByCode(decodeURIComponent(code));
-  if (!data) notFound();
-
-  const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
-
-  const [events, extras] = await Promise.all([
-    db
-      .select()
-      .from(bookingEvents)
-      .where(eq(bookingEvents.bookingId, booking.id))
-      .orderBy(bookingEvents.createdAt),
-    getBookingAddons(booking.id),
-  ]);
-
-  const title = pick(lang, puja.titleEn, puja.titleHi);
-  const temple = pick(lang, templeNameEn ?? "", templeNameHi ?? "");
-  const isConfirmed = booking.status !== "PENDING_PAYMENT";
-  const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
-  const paymentPending = sp.pending === "1" && !isConfirmed;
-  const paymentFailed = sp.failed === "1" && !isConfirmed;
-
-  /**
-   * "Details save karein" — user ke tap karte hi WhatsApp khulta hai aur
-   * poori booking admin ke number par chali jati hai. Isse admin ke paas
-   * har booking WhatsApp me bhi save ho jati hai.
-   */
-  const saveDetailsText = [
-    `🪔 ${t.brand} — ${lang === "hi" ? "बुकिंग विवरण" : "Booking details"}`,
-    "",
-    `${lang === "hi" ? "बुकिंग आईडी" : "Booking ID"}: ${booking.bookingCode}`,
-    `${lang === "hi" ? "नाम" : "Name"}: ${booking.devoteeName}`,
-    `${lang === "hi" ? "गोत्र" : "Gotra"}: ${booking.gotra}`,
-    `${lang === "hi" ? "मोबाइल" : "Mobile"}: ${booking.phone}`,
-    ...(booking.memberNames.length
-      ? [`${lang === "hi" ? "सदस्य" : "Members"}: ${booking.memberNames.join(", ")}`]
-      : []),
-    "",
-    `${lang === "hi" ? "पूजा" : "Puja"}: ${title}`,
-    ...(temple ? [`${lang === "hi" ? "मंदिर" : "Temple"}: ${temple}`] : []),
-    `${lang === "hi" ? "पूजा तिथि" : "Puja date"}: ${formatDate(puja.pujaDate, lang)}`,
-    `${lang === "hi" ? "पैकेज" : "Package"}: ${pick(lang, pkg.nameEn, pkg.nameHi)}`,
-    ...(extras.length
-      ? [
-          `${lang === "hi" ? "अतिरिक्त" : "Add-ons"}: ${extras
-            .map((x) => pick(lang, x.nameEn, x.nameHi))
-            .join(", ")}`,
-        ]
-      : []),
-    `${lang === "hi" ? "कुल राशि" : "Total"}: ${formatINR(booking.amountInPaise)}`,
-    ...(booking.addressLine
-      ? [
-          "",
-          `${lang === "hi" ? "पता" : "Address"}: ${[
-            booking.addressLine,
-            booking.city,
-            booking.state,
-            booking.pincode,
-          ]
-            .filter(Boolean)
-            .join(", ")}`,
-        ]
-      : []),
-    ...(booking.sankalp ? ["", `${lang === "hi" ? "संकल्प" : "Sankalp"}: ${booking.sankalp}`] : []),
-  ].join("\n");
-
-  const saveDetailsLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(saveDetailsText)}`;
-
-  return (
-    <div className="container-x max-w-4xl py-10 sm:py-14">
-      {/* -------- Success banner -------- */}
-      <div
-        className={
-          isConfirmed
-            ? "rounded-3xl bg-gradient-to-br from-green-50 to-saffron-50 p-7 text-center ring-1 ring-green-200"
-            : "rounded-3xl bg-amber-50 p-7 text-center ring-1 ring-amber-300"
-        }
-      >
-        <span className="text-5xl">{isConfirmed ? "🪔" : "⏳"}</span>
-        <h1 className="mt-4 text-2xl sm:text-3xl">
-          {isConfirmed
-            ? lang === "hi"
-              ? "आपकी बुकिंग हो गई!"
-              : "Your booking is confirmed!"
-            : lang === "hi"
-              ? "भुगतान अधूरा है"
-              : "Payment incomplete"}
-        </h1>
-        <p className="mx-auto mt-3 max-w-lg text-[15px] leading-relaxed text-ink/70">
-          {isConfirmed
-            ? lang === "hi"
-              ? `पंडित जी संकल्प में ${booking.devoteeName} (${booking.gotra} गोत्र) का नाम लेंगे। सारी अपडेट ${maskPhone(booking.phone)} पर व्हाट्सएप से भेजी जाएँगी।`
-              : `The pandit ji will take the name of ${booking.devoteeName} (${booking.gotra} gotra) in the sankalp. All updates will be sent on WhatsApp to ${maskPhone(booking.phone)}.`
-            : lang === "hi"
-              ? "आपकी बुकिंग सुरक्षित है, लेकिन भुगतान पूरा नहीं हुआ। कृपया दोबारा प्रयास करें या हमें व्हाट्सएप करें।"
-              : "Your booking is saved but payment was not completed. Please try again or message us on WhatsApp."}
-        </p>
-
-        <div className="mt-6 inline-flex flex-col items-center rounded-2xl border-2 border-dashed border-saffron-300 bg-white px-8 py-4">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-ink/50">
-            {t.track.code}
-          </span>
-          <span className="mt-1 font-display text-2xl font-bold tracking-wider text-maroon-800">
-            {booking.bookingCode}
-          </span>
-        </div>
-
-        <p className="mt-3 text-[12px] text-ink/50">
-          {lang === "hi"
-            ? "अपना मोबाइल नंबर डालकर आप कभी भी इस पूजा की स्थिति देख सकते हैं।"
-            : "You can check this puja's status anytime by entering your mobile number."}
-        </p>
-
-        {/* -------- Details WhatsApp par bhejein -------- */}
-        {isConfirmed && (
-          <div className="mx-auto mt-6 max-w-md rounded-2xl border-2 border-dashed border-[#25D366]/40 bg-white/70 p-4">
-            <p className="text-[13.5px] font-bold text-maroon-800">
-              {lang === "hi"
-                ? "📲 अपना विवरण हमें भेज दें"
-                : "📲 Send your details to us"}
-            </p>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-ink/60">
-              {lang === "hi"
-                ? "एक बार दबाइए — व्हाट्सएप खुलेगा और आपकी पूरी बुकिंग हमारे पास पहुँच जाएगी। इससे पंडित जी को आपका नाम, गोत्र और पूजा की तिथि मिल जाएगी।"
-                : "One tap — WhatsApp opens with your full booking ready to send. This gives our pandit ji your name, gotra and puja date."}
-            </p>
-            <a
-              href={saveDetailsLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-big mt-4 bg-[#25D366] text-white hover:brightness-105"
-            >
-              {lang === "hi" ? "व्हाट्सएप पर भेजें" : "Send on WhatsApp"}
-            </a>
-          </div>
-        )}
-      </div>
-
-      {/* -------- Payment ke baad ke messages -------- */}
-      {paymentPending && (
-        <p className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-[14px] leading-relaxed text-amber-900">
-          ⏳{" "}
-          {lang === "hi"
-            ? "भुगतान की पुष्टि हो रही है। बैंक से जवाब आते ही आपकी बुकिंग अपने आप कन्फर्म हो जाएगी — यह पेज थोड़ी देर बाद दोबारा खोलें। पैसा कट गया हो तो चिंता न करें, राशि सुरक्षित है।"
-            : "Your payment is being confirmed. As soon as the bank responds your booking will confirm automatically — reopen this page in a little while. If money was deducted, it is safe."}
-        </p>
-      )}
-
-      {paymentFailed && (
-        <div className="mt-5 rounded-2xl border border-red-300 bg-red-50 px-5 py-4 text-[14px] leading-relaxed text-red-800">
-          <p className="font-bold">
-            {lang === "hi" ? "भुगतान पूरा नहीं हुआ" : "Payment did not go through"}
-          </p>
-          <p className="mt-1">
-            {lang === "hi"
-              ? "आपकी बुकिंग सुरक्षित है। दोबारा प्रयास करें — कोई राशि नहीं कटी है।"
-              : "Your booking is saved. Please try again — no amount has been deducted."}
-          </p>
-          <Link href={`/pujas/${puja.slug}`} className="btn-primary mt-3 px-5 py-2.5">
-            {lang === "hi" ? "दोबारा भुगतान करें" : "Try payment again"}
-          </Link>
-        </div>
-      )}
-
-      {/* -------- Details -------- */}
-      <div className="mt-8 grid gap-6 md:grid-cols-[1fr_1.1fr]">
-        <div className="card overflow-hidden">
-          <PujaImage
-            imageUrl={puja.imageUrl}
-            artKey={puja.artKey}
-            alt={title}
-            width={640}
-            className="aspect-[16/9] w-full"
-          />
-          <div className="p-5">
-            <h2 className="text-base leading-snug">{title}</h2>
-            {temple && (
-              <p className="mt-1.5 text-[12px] font-bold uppercase tracking-wide text-saffron-700">
-                {temple}
-              </p>
-            )}
-
-            <dl className="mt-4 space-y-2.5 text-[13.5px]">
-              {[
-                { k: t.common.date, v: formatDate(puja.pujaDate, lang) },
-                { k: lang === "hi" ? "पैकेज" : "Package", v: pick(lang, pkg.nameEn, pkg.nameHi) },
-                { k: t.booking.name, v: booking.devoteeName },
-                { k: t.booking.gotra, v: booking.gotra },
-                ...(booking.memberNames.length
-                  ? [{ k: t.booking.members, v: booking.memberNames.join(", ") }]
-                  : []),
-                { k: t.booking.total, v: formatINR(booking.amountInPaise) },
-              ].map((row) => (
-                <div key={row.k} className="flex justify-between gap-4 border-b border-saffron-50 pb-2">
-                  <dt className="shrink-0 text-ink/55">{row.k}</dt>
-                  <dd className="text-right font-semibold text-maroon-800">{row.v}</dd>
-                </div>
-              ))}
-            </dl>
-
-            {extras.length > 0 && (
-              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
-                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
-                  {lang === "hi" ? "अतिरिक्त सामान / सेवा" : "Extra items & seva"}
-                </p>
-                <ul className="mt-2 space-y-1.5">
-                  {extras.map((x) => (
-                    <li key={x.id} className="flex justify-between gap-3 text-[13px]">
-                      <span className="text-ink/70">
-                        {x.kind === "DELIVERY" ? "📦" : "🪔"}{" "}
-                        {pick(lang, x.nameEn, x.nameHi)}
-                      </span>
-                      <span className="shrink-0 font-semibold text-maroon-800">
-                        {formatINR(x.priceInPaise)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {booking.sankalp && (
-              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
-                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
-                  {t.booking.sankalp}
-                </p>
-                <p className="mt-1 text-[13px] leading-relaxed text-ink/70">
-                  {booking.sankalp}
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div>
-          <BookingTimeline lang={lang} status={booking.status} events={events} />
-
-          {booking.videoUrl && (
-            <a
-              href={booking.videoUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-primary mt-5 w-full py-3"
-            >
-              🎬 {lang === "hi" ? "पूजा वीडियो देखें" : "Watch Puja Video"}
-            </a>
-          )}
-
-          {booking.prasadTracking && (
-            <p className="mt-4 rounded-xl border border-saffron-200 bg-white px-4 py-3 text-[13px]">
-              📦 {lang === "hi" ? "प्रसाद ट्रैकिंग" : "Prasad tracking"}:{" "}
-              <span className="font-bold text-maroon-800">{booking.prasadTracking}</span>
-            </p>
-          )}
-
-          <div className="mt-5 flex flex-wrap gap-3">
-            <a
-              href={`https://wa.me/${waNumber}?text=${encodeURIComponent(
-                `Booking ${booking.bookingCode}`,
-              )}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn rounded-full bg-[#25D366] px-5 py-2.5 text-sm font-bold text-white hover:brightness-105"
-            >
-              {t.cta.talkToUs}
-            </a>
-            <Link href="/pujas" className="btn-secondary">
-              {t.cta.viewAll}
-            </Link>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+<file path="package.json">
+{
+  "name": "pooja-path",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed.ts",
+    "db:generate": "npx drizzle-kit@0.31.10 generate",
+    "test:reconcile": "tsx scripts/test-reconcile.mts",
+    "render-build": "npm run db:migrate && npm run db:seed && next build"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "drizzle-orm": "^0.45.2",
+    "jose": "^6.0.12",
+    "next": "16.3.0",
+    "pg": "^8.16.3",
+    "razorpay": "^2.9.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "server-only": "^0.0.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.6",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22",
+    "@types/pg": "^8.15.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
 }
 </file>
 
@@ -11590,6 +12075,553 @@ export default async function AdminBookingDetail({
           adminNote={b.adminNote ?? ""}
         />
       </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/app/admin/(panel)/payments/page.tsx">
+import Link from "next/link";
+import { desc, eq, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { bookings, pujas } from "@/db/schema";
+import { activeProvider, razorpay } from "@/lib/payments";
+import {
+  reconcileAllPending,
+  reviewGatewayPayments,
+  type ReconcileVerdict,
+} from "@/lib/payments/reconcile";
+import { webhookStatus } from "@/lib/payments/webhook-log";
+import { siteConfig } from "@/lib/env";
+import { formatDate, formatINR } from "@/lib/utils";
+import ConfirmSubmit from "@/components/admin/ConfirmSubmit";
+import {
+  attachPaymentAction,
+  cleanupAbandonedAction,
+  confirmAllFromGatewayAction,
+  forceMarkPaidAction,
+  recheckPaymentAction,
+} from "../../actions";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * Payments page — "payment ho gaya par booking pending dikh rahi hai"
+ * ka jawab yahan ek nazar me mil jata hai.
+ *
+ * Page kholte hi har pending booking ke liye seedha gateway se poochha
+ * jata hai ki us order par paisa aaya ya nahi. Jinka paisa mila hua nikla,
+ * wo yahin confirm ho jati hain — kuch dabana nahi padta.
+ */
+
+const VERDICT_STYLE: Record<ReconcileVerdict, { cls: string; label: string }> = {
+  "confirmed-now": { cls: "bg-green-100 text-green-800", label: "✓ Abhi confirm hui" },
+  "already-done": { cls: "bg-green-100 text-green-800", label: "✓ Confirm hai" },
+  "in-progress": { cls: "bg-blue-100 text-blue-800", label: "⏳ Bank ka jawab baaki" },
+  "no-attempt": { cls: "bg-slate-200 text-slate-700", label: "◦ Payment hui hi nahi" },
+  failed: { cls: "bg-red-100 text-red-800", label: "✕ Payment fail hui" },
+  "amount-mismatch": { cls: "bg-amber-100 text-amber-900", label: "⚠️ Raashi alag hai" },
+  "no-order": { cls: "bg-slate-200 text-slate-700", label: "◦ Order bana hi nahi" },
+  "not-configured": { cls: "bg-amber-100 text-amber-900", label: "⚠️ Keys set nahi" },
+  demo: { cls: "bg-slate-200 text-slate-700", label: "Demo booking" },
+  error: { cls: "bg-red-100 text-red-800", label: "⚠️ Gateway se baat nahi hui" },
+};
+
+export default async function AdminPaymentsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    checked?: string;
+    marked?: string;
+    cleaned?: string;
+    ok?: string;
+    msg?: string;
+  }>;
+}) {
+  const sp = await searchParams;
+  const provider = activeProvider();
+
+  /* ---- 1. Booking ki taraf se: har pending booking ko gateway se milao ---- */
+  const reconciled = await reconcileAllPending(20).then(
+    (rows) => ({ rows, error: "" }),
+    (err: unknown) => ({
+      rows: [],
+      error: err instanceof Error ? err.message : String(err),
+    }),
+  );
+  const reports = reconciled.rows;
+  const reconcileError = reconciled.error;
+  const byId = new Map(reports.map((r) => [r.bookingId, r]));
+
+  /* ---- 2. Gateway ki taraf se: Razorpay par aayi payments ---- */
+  const gateway = await reviewGatewayPayments(25).catch((err) => ({
+    ok: false as const,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+  const gatewayRows = gateway.ok ? gateway.rows : [];
+  const stranded = gatewayRows.filter((r) => r.actionable);
+
+  /* ---- Milaan ke baad ki taaza list ---- */
+  const [rows, [counts]] = await Promise.all([
+    db
+      .select({
+        id: bookings.id,
+        code: bookings.bookingCode,
+        name: bookings.devoteeName,
+        phone: bookings.phone,
+        amount: bookings.amountInPaise,
+        status: bookings.status,
+        paymentStatus: bookings.paymentStatus,
+        orderId: bookings.providerOrderId,
+        paymentId: bookings.providerPaymentId,
+        createdAt: bookings.createdAt,
+        pujaTitle: pujas.titleEn,
+      })
+      .from(bookings)
+      .innerJoin(pujas, eq(bookings.pujaId, pujas.id))
+      .where(eq(bookings.status, "PENDING_PAYMENT"))
+      .orderBy(desc(bookings.createdAt))
+      .limit(50),
+    db
+      .select({
+        pending: sql<number>`COUNT(*) FILTER (WHERE ${bookings.status} = 'PENDING_PAYMENT')`.mapWith(Number),
+        confirmed: sql<number>`COUNT(*) FILTER (WHERE ${bookings.status} NOT IN ('PENDING_PAYMENT','CANCELLED'))`.mapWith(Number),
+      })
+      .from(bookings),
+  ]);
+
+  const justConfirmed = reports.filter((r) => r.verdict === "confirmed-now").length;
+  const base = siteConfig.url.replace(/\/$/, "");
+
+  /* ---- Setup health ---- */
+  const keyMode = provider === "razorpay" ? razorpay.keyMode() : "unknown";
+  const wh = webhookStatus();
+  const health: Array<[string, string, boolean, string?]> = [
+    [
+      "Payment gateway",
+      provider === "none" ? "Juda nahi — Demo Mode" : provider,
+      provider !== "none",
+    ],
+    ...(provider === "razorpay"
+      ? ([
+          [
+            "Razorpay Key ID",
+            `${razorpay.maskedKeyId()}  (${keyMode === "test" ? "TEST mode" : keyMode === "live" ? "LIVE mode" : "?"})`,
+            keyMode === "live",
+            keyMode === "test"
+              ? "Test key par asli paisa nahi katta aur mobile par UPI app nahi khulta (“Can't open payment app”). Asli bookings ke liye rzp_live_ key daalein."
+              : undefined,
+          ],
+          [
+            "Webhook secret",
+            razorpay.hasWebhookSecret()
+              ? "Set hai"
+              : "Set nahi hai — RAZORPAY_WEBHOOK_SECRET daalein",
+            razorpay.hasWebhookSecret(),
+            razorpay.hasWebhookSecret()
+              ? undefined
+              : `Webhook hi wo suraksha-jaal hai jo browser wapas na aane par bhi booking confirm karta hai. Razorpay Dashboard → Settings → Webhooks me URL ${base}/api/payment/webhook daalein (events: payment.captured, payment.failed, order.paid) aur wahi secret Render me bhi.`,
+          ],
+        ] as Array<[string, string, boolean, string?]>)
+      : []),
+    [
+      "Webhook URL (yahi daalein)",
+      `${base}/api/payment/webhook`,
+      true,
+      "Razorpay Dashboard → Developers → Webhooks me BILKUL yahi URL hona chahiye. Sirf domain ya /admin daalne se webhook kabhi nahi chalega. Ise browser me kholkar dekh sakte hain — sahi hoga to ek chhota sa JSON message dikhega.",
+    ],
+    [
+      "Webhook aaya ya nahi",
+      wh.total === 0
+        ? "Is server ke chalu hone ke baad ek bhi webhook nahi aaya"
+        : `${wh.total} webhook aaye${wh.rejected ? ` (${wh.rejected} reject hue)` : ""} — aakhri: ${wh.last?.event} • ${wh.last?.detail}`,
+      wh.total > 0 && wh.rejected === 0,
+      wh.total === 0
+        ? "Iska matlab ya to abhi koi payment nahi hui, ya Razorpay me URL galat hai. Upar wala URL daal kar ek test payment karein."
+        : wh.rejected > 0
+          ? wh.last?.detail
+          : undefined,
+    ],
+    ["Callback URL", `${base}/api/payment/razorpay/callback`, true],
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl">Payments</h1>
+          <p className="mt-1 text-[14px] text-ink/55">
+            Har pending booking ka gateway se milaan — page kholte hi apne aap ho jata hai
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Link href="/admin/payments" className="btn-primary px-5 py-2.5">
+            ↻ Dobara check karein
+          </Link>
+          <form action={cleanupAbandonedAction}>
+            <ConfirmSubmit
+              message={
+                "Purani adhuri bookings list se hata dein?\n\nSirf wahi hatengi jinke baare me gateway saaf kahe ki payment hui hi nahi (aur jo 6 ghante se zyada purani hain). Jinka jawab nahi milega unhe haath nahi lagaya jayega."
+              }
+              className="btn-secondary px-5 py-2.5"
+            >
+              Purani adhuri bookings hataayein
+            </ConfirmSubmit>
+          </form>
+        </div>
+      </div>
+
+      {/* ---------- Result messages ---------- */}
+      {sp.msg && (
+        <p
+          className={`rounded-xl border px-4 py-3 text-[13.5px] ${
+            sp.ok === "1"
+              ? "border-green-300 bg-green-50 text-green-800"
+              : "border-red-300 bg-red-50 text-red-800"
+          }`}
+        >
+          {sp.msg}
+        </p>
+      )}
+      {reconcileError && (
+        <p className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-[13.5px] text-red-800">
+          Pending bookings ka milaan nahi ho paya: {reconcileError}
+        </p>
+      )}
+      {justConfirmed > 0 && (
+        <p className="rounded-xl border border-green-300 bg-green-50 px-4 py-3 text-[13.5px] text-green-800">
+          ✓ {justConfirmed} booking ka paisa gateway par mila — abhi confirm kar di gayi.
+        </p>
+      )}
+      {sp.marked === "1" && (
+        <p className="rounded-xl border border-green-300 bg-green-50 px-4 py-3 text-[13.5px] text-green-800">
+          ✓ Booking haath se paid mark kar di gayi. Devotee ko WhatsApp confirmation chala gaya.
+        </p>
+      )}
+      {sp.cleaned && sp.cleaned !== "0" && (
+        <p className="rounded-xl border border-green-300 bg-green-50 px-4 py-3 text-[13.5px] text-green-800">
+          ✓ {sp.cleaned} adhuri booking list se hata di gayi.
+        </p>
+      )}
+      {sp.cleaned === "0" && (
+        <p className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-[13.5px] text-blue-800">
+          Koi booking hatane laayak nahi mili — sab ya to nayi hain ya unka jawab gateway se
+          nahi mila.
+        </p>
+      )}
+
+      {/* ---------- Razorpay ki taraf se milaan ---------- */}
+      <section className="card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-saffron-100 px-5 py-3.5">
+          <div>
+            <h2 className="text-base">Razorpay par aayi payments</h2>
+            <p className="mt-0.5 text-[12.5px] text-ink/55">
+              Seedha Razorpay se poochh kar — har payment ko uski booking se joda gaya hai
+            </p>
+          </div>
+          {stranded.length > 0 && (
+            <form action={confirmAllFromGatewayAction}>
+              <button type="submit" className="btn-primary px-5 py-2.5">
+                💰 {stranded.length} payment ki booking confirm karein
+              </button>
+            </form>
+          )}
+        </div>
+
+        {!gateway.ok ? (
+          <p className="m-5 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-[13.5px] leading-relaxed text-red-800">
+            Razorpay se payments list nahi mil payi: {gateway.error}
+            <br />
+            <span className="text-[12.5px]">
+              Aksar iska matlab hota hai ki <code>RAZORPAY_KEY_ID</code> /{" "}
+              <code>RAZORPAY_KEY_SECRET</code> galat hain ya Render me set nahi hain.
+            </span>
+          </p>
+        ) : gatewayRows.length === 0 ? (
+          <p className="p-10 text-center text-[14px] text-ink/50">
+            Razorpay par abhi tak koi payment nahi aayi.
+          </p>
+        ) : (
+          <ul className="divide-y divide-saffron-50">
+            {gatewayRows.map((p) => (
+              <li
+                key={p.id}
+                className={p.actionable ? "bg-amber-50/60 px-5 py-4" : "px-5 py-4"}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-mono text-[12.5px] font-bold text-maroon-800">{p.id}</p>
+                    <p className="mt-0.5 text-[13px] text-ink/70">
+                      <span className="font-semibold">{formatINR(p.amount)}</span>
+                      {p.method && <> • {p.method}</>}
+                      {p.contact && <> • {p.contact}</>}
+                      {p.createdAt && <> • {formatDate(new Date(p.createdAt * 1000), "en")}</>}
+                    </p>
+                    <p className="mt-0.5 text-[11.5px] text-ink/45">
+                      Order: <code className="font-mono">{p.orderId ?? "—"}</code>
+                      {p.bookingCode && (
+                        <>
+                          {" "}• Booking:{" "}
+                          <Link
+                            href={`/admin/bookings?q=${encodeURIComponent(p.bookingCode)}`}
+                            className="font-mono font-semibold text-saffron-700 hover:underline"
+                          >
+                            {p.bookingCode}
+                          </Link>
+                        </>
+                      )}
+                    </p>
+                  </div>
+
+                  <span
+                    className={`shrink-0 rounded-full px-3 py-1 text-[11.5px] font-bold ${
+                      p.status === "captured"
+                        ? "bg-green-100 text-green-800"
+                        : p.status === "authorized"
+                          ? "bg-blue-100 text-blue-800"
+                          : p.status === "failed"
+                            ? "bg-red-100 text-red-800"
+                            : "bg-slate-200 text-slate-700"
+                    }`}
+                  >
+                    {p.status}
+                  </span>
+                </div>
+
+                <p className="mt-2 text-[12.5px] leading-relaxed text-ink/70">{p.note}</p>
+
+                {p.actionable && (
+                  <form action={attachPaymentAction} className="mt-2">
+                    <input type="hidden" name="paymentId" value={p.id} />
+                    <button
+                      type="submit"
+                      className="rounded-full bg-green-600 px-4 py-2 text-[12.5px] font-bold text-white hover:bg-green-700"
+                    >
+                      Jodein aur confirm karein
+                    </button>
+                  </form>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* Manual paste */}
+        <form
+          action={attachPaymentAction}
+          className="flex flex-wrap items-end gap-3 border-t border-saffron-100 bg-saffron-50/40 px-5 py-4"
+        >
+          <div className="min-w-[240px] flex-1">
+            <label className="label" htmlFor="paymentId">
+              Ya Razorpay ki Payment ID paste karein
+            </label>
+            <p className="-mt-1 mb-1.5 text-[11.5px] text-ink/45">
+              Razorpay Dashboard → Payments me se copy karein, jaise pay_TQ1KNZ84kUwj8O.
+              Hum khud Razorpay se poochh kar uski booking confirm kar denge.
+            </p>
+            <input
+              id="paymentId"
+              name="paymentId"
+              required
+              maxLength={40}
+              placeholder="pay_XXXXXXXXXXXX"
+              className="input font-mono text-[13px]"
+            />
+          </div>
+          <button type="submit" className="btn-secondary px-5 py-2.5">
+            Dhoondh kar confirm karein
+          </button>
+        </form>
+      </section>
+
+      {/* ---------- Setup health ---------- */}
+      <section className="card overflow-hidden">
+        <h2 className="border-b border-saffron-100 px-5 py-3.5 text-base">Setup</h2>
+        <dl className="divide-y divide-saffron-50">
+          {health.map(([k, v, ok, warn]) => (
+            <div key={k} className="px-5 py-3 text-[13.5px]">
+              <div className="flex flex-wrap items-center gap-3">
+                <dt className="w-40 shrink-0 text-ink/50">{k}</dt>
+                <dd className="min-w-0 flex-1 break-all font-medium text-maroon-800">{v}</dd>
+                <span
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                    ok ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"
+                  }`}
+                >
+                  {ok ? "OK" : "Dhyaan dein"}
+                </span>
+              </div>
+              {warn && (
+                <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] leading-relaxed text-amber-900">
+                  {warn}
+                </p>
+              )}
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {/* ---------- Counts ---------- */}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="card p-5">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-ink/45">
+            Abhi pending
+          </p>
+          <p className="mt-2 font-display text-2xl font-bold text-amber-700">{counts.pending}</p>
+        </div>
+        <div className="card p-5">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-ink/45">
+            Confirm ho chuki
+          </p>
+          <p className="mt-2 font-display text-2xl font-bold text-green-700">
+            {counts.confirmed}
+          </p>
+        </div>
+      </div>
+
+      {/* ---------- Pending list ---------- */}
+      <section className="card overflow-hidden">
+        <h2 className="border-b border-saffron-100 px-5 py-3.5 text-base">
+          Pending bookings — gateway kya kehta hai
+        </h2>
+
+        {rows.length === 0 ? (
+          <p className="p-10 text-center text-[14px] text-ink/50">
+            🎉 Ek bhi booking pending nahi hai.
+          </p>
+        ) : (
+          <ul className="divide-y divide-saffron-50">
+            {rows.map((b) => {
+              const r = byId.get(b.id);
+              const style = r ? VERDICT_STYLE[r.verdict] : null;
+
+              return (
+                <li key={b.id} className="px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <Link
+                        href={`/admin/bookings/${b.id}`}
+                        className="font-mono text-[13px] font-bold text-saffron-700 hover:underline"
+                      >
+                        {b.code}
+                      </Link>
+                      <p className="mt-0.5 text-[13.5px] font-semibold text-maroon-800">
+                        {b.name} • {b.phone}
+                      </p>
+                      <p className="text-[12.5px] text-ink/55">
+                        {b.pujaTitle} • {formatINR(b.amount)} •{" "}
+                        {formatDate(b.createdAt, "en")}
+                      </p>
+                    </div>
+
+                    {style && (
+                      <span
+                        className={`shrink-0 rounded-full px-3 py-1 text-[11.5px] font-bold ${style.cls}`}
+                      >
+                        {style.label}
+                      </span>
+                    )}
+                  </div>
+
+                  {r && (
+                    <p className="mt-2 rounded-lg bg-saffron-50/70 px-3 py-2 text-[12.5px] leading-relaxed text-ink/70">
+                      {r.message}
+                    </p>
+                  )}
+
+                  {r && r.attempts.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {r.attempts.map((a) => (
+                        <li
+                          key={a.id}
+                          className="flex flex-wrap items-center gap-2 text-[11.5px] text-ink/55"
+                        >
+                          <code className="rounded bg-white px-1.5 py-0.5 font-mono">
+                            {a.id}
+                          </code>
+                          <span className="font-semibold text-maroon-800">{a.status}</span>
+                          <span>{formatINR(a.amount)}</span>
+                          {a.method && <span>via {a.method}</span>}
+                          {a.errorDescription && (
+                            <span className="text-red-700">— {a.errorDescription}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <p className="text-[11.5px] text-ink/45">
+                      Order: <code className="font-mono">{b.orderId ?? "—"}</code>
+                      {b.paymentId && (
+                        <>
+                          {" "}• Txn: <code className="font-mono">{b.paymentId}</code>
+                        </>
+                      )}
+                    </p>
+
+                    <div className="ml-auto flex flex-wrap gap-2">
+                      <form action={recheckPaymentAction}>
+                        <input type="hidden" name="bookingId" value={b.id} />
+                        <button
+                          type="submit"
+                          className="rounded-full border border-saffron-300 bg-white px-3 py-1.5 text-[12px] font-semibold text-saffron-700"
+                        >
+                          ↻ Ab check karein
+                        </button>
+                      </form>
+
+                      <form action={forceMarkPaidAction}>
+                        <input type="hidden" name="bookingId" value={b.id} />
+                        <ConfirmSubmit
+                          message={`SAAVDHAN!\n\n"${b.code}" ko haath se PAID mark karein?\n\nYe tabhi karein jab aapko pakka pata ho ki paisa aa gaya hai (bank statement ya Razorpay dashboard me dikh raha ho). Devotee ko turant confirmation WhatsApp chala jayega.`}
+                          className="rounded-full border border-green-300 bg-white px-3 py-1.5 text-[12px] font-semibold text-green-700"
+                        >
+                          Haath se paid mark karein
+                        </ConfirmSubmit>
+                      </form>
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {counts.pending > 20 && (
+          <p className="border-t border-saffron-50 px-5 py-3 text-[12px] text-ink/50">
+            Note: ek baar me sirf 20 sabse nayi pending bookings gateway se check hoti hain
+            (taaki page dheema na ho). Baaki ke liye page dobara kholein ya unke saamne
+            “Ab check karein” dabayein.
+          </p>
+        )}
+      </section>
+
+      {/* ---------- Samajhne ke liye ---------- */}
+      <section className="card p-5">
+        <h2 className="text-base">Ye page kya batata hai</h2>
+        <ul className="mt-3 space-y-2 text-[13px] leading-relaxed text-ink/70">
+          <li>
+            <strong>◦ Payment hui hi nahi</strong> — user ne payment window band kar di.
+            Paisa nahi kata, booking se koi lena-dena nahi. Ye sabse aam wajah hai.
+          </li>
+          <li>
+            <strong>⏳ Bank ka jawab baaki</strong> — UPI/netbanking me kabhi-kabhi 2-10 minute
+            lagte hain. Thodi der baad apne aap confirm ho jayegi.
+          </li>
+          <li>
+            <strong>✕ Payment fail hui</strong> — bank ne mana kar diya. Paisa nahi kata.
+          </li>
+          <li>
+            <strong>✓ Abhi confirm hui</strong> — paisa pehle hi aa chuka tha par browser
+            wapas nahi aaya tha; humne gateway se poochh kar booking confirm kar di.
+          </li>
+          <li>
+            <strong>⚠️ Gateway se baat nahi hui</strong> — keys galat hain ya Razorpay down
+            hai. Setup wale hisse me upar dekhein.
+          </li>
+        </ul>
+      </section>
     </div>
   );
 }
@@ -12333,190 +13365,49 @@ export default function PujaForm({
 }
 </file>
 
-<file path="src/app/admin/(panel)/page.tsx">
+<file path="src/app/admin/(panel)/AdminNav.tsx">
+"use client";
+
 import Link from "next/link";
-import { desc, eq, gte, sql } from "drizzle-orm";
-import { db } from "@/db";
-import { activeProvider } from "@/lib/payments";
-import { bookings, contactMessages, pujas } from "@/db/schema";
-import { formatDate, formatINR } from "@/lib/utils";
-import {whatsappProvider} from "@/lib/env";
-import StatusBadge from "./StatusBadge";
+import { usePathname } from "next/navigation";
+import { cn } from "@/lib/utils";
 
-export const dynamic = "force-dynamic";
+const LINKS = [
+  { href: "/admin", label: "Dashboard", exact: true },
+  { href: "/admin/bookings", label: "Bookings" },
+  { href: "/admin/payments", label: "Payments" },
+  { href: "/admin/pujas", label: "Pujas" },
+  { href: "/admin/addons", label: "Add-ons" },
+  { href: "/admin/messages", label: "Messages" },
+  { href: "/admin/settings", label: "Settings" },
+];
 
-export default async function AdminDashboard() {
-  const [[stats], recent, [msgCount]] = await Promise.all([
-    db
-      .select({
-        total: sql<number>`COUNT(*)`.mapWith(Number),
-        confirmed: sql<number>`COUNT(*) FILTER (WHERE ${bookings.status} <> 'PENDING_PAYMENT' AND ${bookings.status} <> 'CANCELLED')`.mapWith(Number),
-        pending: sql<number>`COUNT(*) FILTER (WHERE ${bookings.status} = 'PENDING_PAYMENT')`.mapWith(Number),
-        revenue: sql<number>`COALESCE(SUM(${bookings.amountInPaise}) FILTER (WHERE ${bookings.status} <> 'PENDING_PAYMENT' AND ${bookings.status} <> 'CANCELLED' AND ${bookings.status} <> 'REFUNDED'), 0)`.mapWith(Number),
-        last30: sql<number>`COUNT(*) FILTER (WHERE ${bookings.createdAt} >= now() - interval '30 days')`.mapWith(Number),
-      })
-      .from(bookings),
-    db
-      .select({
-        id: bookings.id,
-        code: bookings.bookingCode,
-        name: bookings.devoteeName,
-        phone: bookings.phone,
-        amount: bookings.amountInPaise,
-        status: bookings.status,
-        createdAt: bookings.createdAt,
-        pujaTitle: pujas.titleEn,
-      })
-      .from(bookings)
-      .innerJoin(pujas, eq(bookings.pujaId, pujas.id))
-      .orderBy(desc(bookings.createdAt))
-      .limit(8),
-    db
-      .select({ unread: sql<number>`COUNT(*) FILTER (WHERE ${contactMessages.isRead} = false)`.mapWith(Number) })
-      .from(contactMessages),
-  ]);
-
-  const [activePujas] = await db
-    .select({
-      n: sql<number>`COUNT(*) FILTER (WHERE ${pujas.isActive} = true)`.mapWith(Number),
-    })
-    .from(pujas);
-
-  const cards = [
-    { label: "Total bookings", value: stats.total, tone: "text-maroon-800" },
-    { label: "Confirmed", value: stats.confirmed, tone: "text-green-700" },
-    { label: "Payment pending", value: stats.pending, tone: "text-amber-700" },
-    { label: "Revenue (confirmed)", value: formatINR(stats.revenue), tone: "text-saffron-700" },
-    { label: "Bookings (30 days)", value: stats.last30, tone: "text-maroon-800" },
-    { label: "Active pujas", value: activePujas.n, tone: "text-maroon-800" },
-  ];
-
-  const waProvider = whatsappProvider();
-  const payProvider = activeProvider();
+export default function AdminNav() {
+  const pathname = usePathname();
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl">Dashboard</h1>
-        <p className="mt-1 text-[14px] text-ink/55">Aaj ki sthiti ek nazar mein</p>
-      </div>
-
-      {/* Setup warnings */}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {payProvider === "none" && (
-          <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
-            <p className="text-[13px] font-bold text-amber-900">
-              ⚠️ Payment gateway connect nahi hai
-            </p>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-amber-800">
-              Site abhi Demo Mode me hai — booking ban jati hai par paisa nahi katta.
-              Render ke Environment tab me <code>RAZORPAY_KEY_ID</code> aur{" "}
-              <code>RAZORPAY_KEY_SECRET</code> daal kar redeploy karein.
-            </p>
-          </div>
-        )}
-        {payProvider !== "none" && (
-          <div className="rounded-2xl border border-green-300 bg-green-50 p-4">
-            <p className="text-[13px] font-bold text-green-900">
-              ✓ Payment gateway chalu hai ({payProvider})
-            </p>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-green-800">
-              Bookings par asli payment liya ja raha hai.
-              {payProvider === "razorpay" && (
-                <>
-                  {" "}Webhook URL: <code>/api/payment/webhook</code>
-                </>
-              )}
-            </p>
-          </div>
-        )}
-        {waProvider === "none" && (
-          <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-            <p className="text-[13px] font-bold text-blue-900">ℹ️ WhatsApp updates band hain</p>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-blue-800">
-              Message abhi sirf server log me jate hain. AiSensy/Interakt ki API key{" "}
-              <code>.env</code> me daalte hi apne aap chalu ho jayenge.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* Stats */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {cards.map((c) => (
-          <div key={c.label} className="card p-5">
-            <p className="text-[11px] font-bold uppercase tracking-wider text-ink/45">
-              {c.label}
-            </p>
-            <p className={`mt-2 font-display text-2xl font-bold ${c.tone}`}>{c.value}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Recent bookings */}
-      <section className="card overflow-hidden">
-        <div className="flex items-center justify-between border-b border-saffron-100 px-5 py-4">
-          <h2 className="text-lg">Recent bookings</h2>
-          <Link href="/admin/bookings" className="text-[13px] font-semibold text-saffron-700">
-            Sabhi dekhein →
-          </Link>
-        </div>
-
-        {recent.length === 0 ? (
-          <p className="p-8 text-center text-[14px] text-ink/50">Abhi koi booking nahi hai.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-[13.5px]">
-              <thead className="bg-saffron-50/60 text-left text-[11px] uppercase tracking-wide text-ink/50">
-                <tr>
-                  <th className="px-5 py-2.5 font-bold">Booking ID</th>
-                  <th className="px-5 py-2.5 font-bold">Devotee</th>
-                  <th className="px-5 py-2.5 font-bold">Puja</th>
-                  <th className="px-5 py-2.5 font-bold">Amount</th>
-                  <th className="px-5 py-2.5 font-bold">Status</th>
-                  <th className="px-5 py-2.5 font-bold">Date</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-saffron-50">
-                {recent.map((b) => (
-                  <tr key={b.id} className="hover:bg-saffron-50/40">
-                    <td className="px-5 py-3">
-                      <Link
-                        href={`/admin/bookings/${b.id}`}
-                        className="font-mono text-[12.5px] font-bold text-saffron-700"
-                      >
-                        {b.code}
-                      </Link>
-                    </td>
-                    <td className="px-5 py-3">
-                      <p className="font-semibold text-maroon-800">{b.name}</p>
-                      <p className="text-[12px] text-ink/50">{b.phone}</p>
-                    </td>
-                    <td className="max-w-[220px] truncate px-5 py-3 text-ink/70">{b.pujaTitle}</td>
-                    <td className="px-5 py-3 font-semibold">{formatINR(b.amount)}</td>
-                    <td className="px-5 py-3">
-                      <StatusBadge status={b.status} />
-                    </td>
-                    <td className="whitespace-nowrap px-5 py-3 text-[12.5px] text-ink/55">
-                      {formatDate(b.createdAt, "en")}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {msgCount.unread > 0 && (
-        <Link
-          href="/admin/messages"
-          className="card block bg-saffron-50 p-4 text-[14px] font-semibold text-maroon-800"
-        >
-          📩 {msgCount.unread} naye contact message padhe nahi gaye →
-        </Link>
-      )}
-    </div>
+    <nav className="border-t border-saffron-50 bg-white">
+      <ul className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-4 sm:px-6">
+        {LINKS.map((l) => {
+          const active = l.exact ? pathname === l.href : pathname.startsWith(l.href);
+          return (
+            <li key={l.href}>
+              <Link
+                href={l.href}
+                className={cn(
+                  "-mb-px block whitespace-nowrap border-b-2 px-3 py-2.5 text-[13.5px] font-semibold transition",
+                  active
+                    ? "border-saffron-600 text-saffron-700"
+                    : "border-transparent text-ink/55 hover:text-maroon-800",
+                )}
+              >
+                {l.label}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
   );
 }
 </file>
@@ -12688,6 +13579,241 @@ export async function POST(req: Request) {
       502,
     );
   }
+}
+</file>
+
+<file path="src/app/api/payment/webhook/route.ts">
+import { NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
+import { db } from "@/db";
+import { bookings } from "@/db/schema";
+import { verifyWebhookSignature } from "@/lib/payments/razorpay";
+import { confirmBookingPaid, markBookingFailed } from "@/lib/booking-service";
+import { recordWebhook } from "@/lib/payments/webhook-log";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * Browser me ye URL kholne par saaf-saaf pata chal jata hai ki
+ * Razorpay dashboard me sahi jagah daali gayi hai ya nahi.
+ * Koi secret ya niji jaankari yahan nahi jaati.
+ */
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    endpoint: "razorpay-webhook",
+    message:
+      "Yehi sahi webhook URL hai. Ise Razorpay Dashboard → Settings → Webhooks me daalein.",
+    expects: "POST with x-razorpay-signature",
+  });
+}
+
+/**
+ * Razorpay webhook.
+ *
+ * Ye endpoint bahar se aata hai isliye CSRF check nahi hota —
+ * iski jagah HMAC signature verify hota hai. Bina sahi signature ke
+ * koi bhi request reject ho jati hai.
+ *
+ * Razorpay Dashboard > Settings > Webhooks:
+ *   URL:    https://aapka-domain.com/api/payment/webhook
+ *   Events: payment.captured, payment.failed, order.paid
+ */
+export async function POST(req: Request) {
+  const raw = await req.text();
+  const signature = req.headers.get("x-razorpay-signature");
+
+  if (!verifyWebhookSignature(raw, signature)) {
+    console.warn("[webhook] invalid signature");
+    recordWebhook({
+      event: "?",
+      ok: false,
+      detail: signature
+        ? "Signature match nahi hui — Razorpay wala secret aur RAZORPAY_WEBHOOK_SECRET ek jaisa nahi hai."
+        : "Signature aayi hi nahi — Razorpay ke webhook me Secret khaali chhoda gaya hai.",
+    });
+    return NextResponse.json({ ok: false }, { status: 401 });
+  }
+
+  let event: {
+    event?: string;
+    payload?: {
+      payment?: { entity?: { id?: string; order_id?: string; amount?: number } };
+      order?: { entity?: { id?: string } };
+    };
+  };
+
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    return NextResponse.json({ ok: false }, { status: 400 });
+  }
+
+  const payment = event.payload?.payment?.entity;
+  const orderId = payment?.order_id ?? event.payload?.order?.entity?.id;
+  const eventName = event.event ?? "?";
+
+  if (!orderId) {
+    recordWebhook({ event: eventName, ok: true, detail: "Is event me order id nahi thi." });
+    return NextResponse.json({ ok: true, ignored: true });
+  }
+
+  const [booking] = await db
+    .select()
+    .from(bookings)
+    .where(eq(bookings.providerOrderId, orderId))
+    .limit(1);
+
+  if (!booking) {
+    recordWebhook({
+      event: eventName,
+      ok: true,
+      detail: `Order ${orderId} ki koi booking nahi mili.`,
+    });
+    return NextResponse.json({ ok: true, ignored: true });
+  }
+
+  recordWebhook({ event: eventName, ok: true, detail: `Booking ${booking.bookingCode}` });
+
+  switch (event.event) {
+    case "payment.captured":
+    case "order.paid": {
+      // amount cross-check
+      if (payment?.amount != null && Number(payment.amount) !== booking.amountInPaise) {
+        console.warn("[webhook] amount mismatch for", booking.bookingCode);
+        return NextResponse.json({ ok: true, ignored: true });
+      }
+      await confirmBookingPaid({
+        bookingId: booking.id,
+        providerPaymentId: payment?.id ?? null,
+      });
+      break;
+    }
+
+    case "payment.failed": {
+      await markBookingFailed(booking.id);
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  return NextResponse.json({ ok: true });
+}
+</file>
+
+<file path="src/app/api/track/route.ts">
+import { NextResponse } from "next/server";
+import { and, desc, eq, ne } from "drizzle-orm";
+import { db } from "@/db";
+import { bookings, pujas, temples } from "@/db/schema";
+import { trackSchema } from "@/lib/validation";
+import { guardPublicPost, jsonError } from "@/lib/guard";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
+import { normalizePhone } from "@/lib/utils";
+import { reconcilePendingForPhone } from "@/lib/payments/reconcile";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * Booking tracking.
+ *
+ * Sirf mobile number se saari bookings mil jati hain — user ke liye sabse aasan.
+ * Privacy ke liye is list me sirf puja ka naam, tithi aur status bhejte hain;
+ * naam, gotra aur pata yahan nahi aate.
+ *
+ * Number guessing rokne ke liye sakht rate limit hai (10 min me 8 koshish).
+ */
+export async function POST(req: Request) {
+  const csrf = guardPublicPost(req);
+  if (csrf) return csrf;
+
+  const ip = clientIp(req);
+  const limit = rateLimit(`track:${ip}`, {
+    limit: 8,
+    windowMs: 10 * 60_000,
+    blockMs: 20 * 60_000,
+  });
+  if (!limit.ok) {
+    return jsonError("Bahut zyada koshishein. Thodi der baad try karein.", 429);
+  }
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError("Invalid request.", 400);
+  }
+
+  const parsed = trackSchema.safeParse(body);
+  if (!parsed.success) return jsonError("Sahi 10-digit mobile number daalein.", 400);
+
+  const phone = normalizePhone(parsed.data.phone);
+  if (!phone) return jsonError("Sahi 10-digit mobile number daalein.", 400);
+
+  const code = parsed.data.bookingCode?.trim().toUpperCase();
+
+  /* ---- Agar Booking ID bhi diya hai to seedha wahi booking ---- */
+  if (code) {
+    const [row] = await db
+      .select({ code: bookings.bookingCode })
+      .from(bookings)
+      .where(and(eq(bookings.bookingCode, code), eq(bookings.phone, phone)))
+      .limit(1);
+
+    if (!row) return jsonError("not_found", 404);
+    return NextResponse.json({ ok: true, bookingCode: row.code });
+  }
+
+  /**
+   * List dikhane se pehle gateway se poochh lo.
+   *
+   * Agar user ne paisa de diya tha par browser wapas nahi aaya (mobile par
+   * UPI app se aksar hota hai), to yahin booking confirm ho jayegi aur
+   * neeche list me sahi status dikhega — "Payment pending" nahi.
+   */
+  await reconcilePendingForPhone(phone).catch(() => null);
+
+  /* ---- Sirf number: uski saari bookings ki list ---- */
+  const rows = await db
+    .select({
+      bookingCode: bookings.bookingCode,
+      status: bookings.status,
+      amountInPaise: bookings.amountInPaise,
+      createdAt: bookings.createdAt,
+      pujaTitleEn: pujas.titleEn,
+      pujaTitleHi: pujas.titleHi,
+      pujaDate: pujas.pujaDate,
+      artKey: pujas.artKey,
+      imageUrl: pujas.imageUrl,
+      templeNameEn: temples.nameEn,
+      templeNameHi: temples.nameHi,
+    })
+    .from(bookings)
+    .innerJoin(pujas, eq(bookings.pujaId, pujas.id))
+    .leftJoin(temples, eq(pujas.templeId, temples.id))
+    .where(and(eq(bookings.phone, phone), ne(bookings.status, "CANCELLED")))
+    .orderBy(desc(bookings.createdAt))
+    .limit(30);
+
+  if (rows.length === 0) return jsonError("not_found", 404);
+
+  // Jo abhi baaki hain wo pehle, poori ho chuki neeche
+  const DONE = new Set(["COMPLETED", "REFUNDED"]);
+  const upcoming = rows.filter((r) => !DONE.has(r.status));
+  const past = rows.filter((r) => DONE.has(r.status));
+
+  return NextResponse.json({
+    ok: true,
+    bookings: [...upcoming, ...past].map((r) => ({
+      ...r,
+      pujaDate: r.pujaDate.toISOString(),
+      createdAt: r.createdAt.toISOString(),
+    })),
+  });
 }
 </file>
 
@@ -13438,621 +14564,534 @@ export async function resolveAddons(pujaId: string, addonIds: string[]) {
 }
 </file>
 
-<file path="src/app/admin/actions.ts">
-"use server";
-
-import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
-import { headers } from "next/headers";
-import { eq, inArray, sql } from "drizzle-orm";
+<file path="src/app/(site)/booking/[code]/page.tsx">
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import {
-  addons,
-  adminUsers,
-  bookings,
-  categories,
-  packages,
-  pujaAddons,
-  pujas,
-  temples,
-} from "@/db/schema";
-import {
-  attemptLogin,
-  createSessionCookie,
-  destroySessionCookie,
-  getAdminSession,
-  hashPassword,
-  verifyPassword,
-} from "@/lib/auth";
-import { rateLimit } from "@/lib/rate-limit";
-import {
-  adminAddonSchema,
-  adminBookingUpdateSchema,
-  adminPujaSchema,
-  firstError,
-  loginSchema,
-} from "@/lib/validation";
-import { changeBookingStatus } from "@/lib/booking-service";
-import { slugify } from "@/lib/utils";
+import { bookingEvents } from "@/db/schema";
+import PujaImage from "@/components/PujaImage";
+import BookingTimeline from "@/components/BookingTimeline";
+import PendingPaymentWatcher from "@/components/PendingPaymentWatcher";
+import { reconcileByBookingCode } from "@/lib/payments/reconcile";
+import { getLangDict } from "@/lib/lang-server";
+import { pick } from "@/lib/i18n";
+import { formatDate, formatINR, maskPhone } from "@/lib/utils";
+import { siteConfig } from "@/lib/env";
+import { getBookingAddons, getBookingByCode } from "@/lib/queries";
 
-export type ActionState = { error?: string; success?: string };
+export const metadata: Metadata = {
+  title: "Booking Status",
+  robots: { index: false, follow: false },
+};
 
-async function ipKey() {
-  const h = await headers();
-  const fwd = h.get("x-forwarded-for");
-  return fwd?.split(",")[0].trim() || h.get("x-real-ip") || "unknown";
-}
+type Params = Promise<{ code: string }>;
+type Search = Promise<{ paid?: string; pending?: string; failed?: string }>;
 
-/* ------------------------------------------------------------------ */
-/*  Auth                                                               */
-/* ------------------------------------------------------------------ */
+export default async function BookingStatusPage({
+  params,
+  searchParams,
+}: {
+  params: Params;
+  searchParams: Search;
+}) {
+  const { code } = await params;
+  const sp = await searchParams;
+  const { lang, t } = await getLangDict();
 
-export async function loginAction(
-  _prev: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const ip = await ipKey();
-  const limit = rateLimit(`admin-login:${ip}`, {
-    limit: 6,
-    windowMs: 15 * 60_000,
-    blockMs: 30 * 60_000,
-  });
-  if (!limit.ok) {
-    return {
-      error: `Bahut zyada koshishein. ${Math.ceil(limit.retryAfterSeconds / 60)} minute baad try karein.`,
-    };
-  }
+  const plainCode = decodeURIComponent(code);
 
-  const parsed = loginSchema.safeParse({
-    email: formData.get("email"),
-    password: formData.get("password"),
-  });
-  if (!parsed.success) return { error: "Email aur password sahi daalein." };
+  /**
+   * Page khulte hi gateway se poochh lo ki paisa aaya ya nahi.
+   *
+   * Callback ya webhook chuk bhi jaye to booking yahin apne aap confirm
+   * ho jati hai — user ko "payment pending" dekh kar ghabrana nahi padta.
+   * Gateway se baat na ho paye to chup-chaap aage badh jate hain.
+   */
+  await reconcileByBookingCode(plainCode).catch(() => null);
 
-  const result = await attemptLogin(parsed.data.email, parsed.data.password);
+  const data = await getBookingByCode(plainCode);
+  if (!data) notFound();
 
-  if (!result.ok) {
-    if (result.reason === "locked") {
-      return {
-        error: `Account ${result.minutes} minute ke liye lock hai (bahut galat koshishein).`,
-      };
-    }
-    if (result.reason === "disabled") return { error: "Ye account band kar diya gaya hai." };
-    return { error: "Email ya password galat hai." };
-  }
+  const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
 
-  await createSessionCookie(result.session);
-  redirect("/admin");
-}
+  const [events, extras] = await Promise.all([
+    db
+      .select()
+      .from(bookingEvents)
+      .where(eq(bookingEvents.bookingId, booking.id))
+      .orderBy(bookingEvents.createdAt),
+    getBookingAddons(booking.id),
+  ]);
 
-export async function logoutAction() {
-  await destroySessionCookie();
-  redirect("/admin/login");
-}
+  const title = pick(lang, puja.titleEn, puja.titleHi);
+  const temple = pick(lang, templeNameEn ?? "", templeNameHi ?? "");
+  const isConfirmed = booking.status !== "PENDING_PAYMENT";
+  const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
+  const paymentPending = sp.pending === "1" && !isConfirmed;
+  const paymentFailed = sp.failed === "1" && !isConfirmed;
 
-export async function changePasswordAction(
-  _prev: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const session = await getAdminSession();
-  if (!session) return { error: "Login zaroori hai." };
+  /**
+   * "Details save karein" — user ke tap karte hi WhatsApp khulta hai aur
+   * poori booking admin ke number par chali jati hai. Isse admin ke paas
+   * har booking WhatsApp me bhi save ho jati hai.
+   */
+  const saveDetailsText = [
+    `🪔 ${t.brand} — ${lang === "hi" ? "बुकिंग विवरण" : "Booking details"}`,
+    "",
+    `${lang === "hi" ? "बुकिंग आईडी" : "Booking ID"}: ${booking.bookingCode}`,
+    `${lang === "hi" ? "नाम" : "Name"}: ${booking.devoteeName}`,
+    `${lang === "hi" ? "गोत्र" : "Gotra"}: ${booking.gotra}`,
+    `${lang === "hi" ? "मोबाइल" : "Mobile"}: ${booking.phone}`,
+    ...(booking.memberNames.length
+      ? [`${lang === "hi" ? "सदस्य" : "Members"}: ${booking.memberNames.join(", ")}`]
+      : []),
+    "",
+    `${lang === "hi" ? "पूजा" : "Puja"}: ${title}`,
+    ...(temple ? [`${lang === "hi" ? "मंदिर" : "Temple"}: ${temple}`] : []),
+    `${lang === "hi" ? "पूजा तिथि" : "Puja date"}: ${formatDate(puja.pujaDate, lang)}`,
+    `${lang === "hi" ? "पैकेज" : "Package"}: ${pick(lang, pkg.nameEn, pkg.nameHi)}`,
+    ...(extras.length
+      ? [
+          `${lang === "hi" ? "अतिरिक्त" : "Add-ons"}: ${extras
+            .map((x) => pick(lang, x.nameEn, x.nameHi))
+            .join(", ")}`,
+        ]
+      : []),
+    `${lang === "hi" ? "कुल राशि" : "Total"}: ${formatINR(booking.amountInPaise)}`,
+    ...(booking.addressLine
+      ? [
+          "",
+          `${lang === "hi" ? "पता" : "Address"}: ${[
+            booking.addressLine,
+            booking.city,
+            booking.state,
+            booking.pincode,
+          ]
+            .filter(Boolean)
+            .join(", ")}`,
+        ]
+      : []),
+    ...(booking.sankalp ? ["", `${lang === "hi" ? "संकल्प" : "Sankalp"}: ${booking.sankalp}`] : []),
+  ].join("\n");
 
-  const current = String(formData.get("currentPassword") ?? "");
-  const next = String(formData.get("newPassword") ?? "");
-  const confirm = String(formData.get("confirmPassword") ?? "");
+  const saveDetailsLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(saveDetailsText)}`;
 
-  if (next.length < 10) return { error: "Naya password kam se kam 10 character ka rakhein." };
-  if (next !== confirm) return { error: "Dono naye password match nahi kar rahe." };
-  if (next === current) return { error: "Naya password purane se alag rakhein." };
+  return (
+    <div className="container-x max-w-4xl py-10 sm:py-14">
+      {/* -------- Success banner -------- */}
+      <div
+        className={
+          isConfirmed
+            ? "rounded-3xl bg-gradient-to-br from-green-50 to-saffron-50 p-7 text-center ring-1 ring-green-200"
+            : "rounded-3xl bg-amber-50 p-7 text-center ring-1 ring-amber-300"
+        }
+      >
+        <span className="text-5xl">{isConfirmed ? "🪔" : "⏳"}</span>
+        <h1 className="mt-4 text-2xl sm:text-3xl">
+          {isConfirmed
+            ? lang === "hi"
+              ? "आपकी बुकिंग हो गई!"
+              : "Your booking is confirmed!"
+            : lang === "hi"
+              ? "भुगतान अधूरा है"
+              : "Payment incomplete"}
+        </h1>
+        <p className="mx-auto mt-3 max-w-lg text-[15px] leading-relaxed text-ink/70">
+          {isConfirmed
+            ? lang === "hi"
+              ? `पंडित जी संकल्प में ${booking.devoteeName} (${booking.gotra} गोत्र) का नाम लेंगे। सारी अपडेट ${maskPhone(booking.phone)} पर व्हाट्सएप से भेजी जाएँगी।`
+              : `The pandit ji will take the name of ${booking.devoteeName} (${booking.gotra} gotra) in the sankalp. All updates will be sent on WhatsApp to ${maskPhone(booking.phone)}.`
+            : lang === "hi"
+              ? "आपकी बुकिंग सुरक्षित है, लेकिन भुगतान पूरा नहीं हुआ। कृपया दोबारा प्रयास करें या हमें व्हाट्सएप करें।"
+              : "Your booking is saved but payment was not completed. Please try again or message us on WhatsApp."}
+        </p>
 
-  const [user] = await db
-    .select()
-    .from(adminUsers)
-    .where(eq(adminUsers.id, session.sub))
-    .limit(1);
-  if (!user) return { error: "Account nahi mila." };
+        <div className="mt-6 inline-flex flex-col items-center rounded-2xl border-2 border-dashed border-saffron-300 bg-white px-8 py-4">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-ink/50">
+            {t.track.code}
+          </span>
+          <span className="mt-1 font-display text-2xl font-bold tracking-wider text-maroon-800">
+            {booking.bookingCode}
+          </span>
+        </div>
 
-  if (!(await verifyPassword(current, user.passwordHash))) {
-    return { error: "Purana password galat hai." };
-  }
+        <p className="mt-3 text-[12px] text-ink/50">
+          {lang === "hi"
+            ? "अपना मोबाइल नंबर डालकर आप कभी भी इस पूजा की स्थिति देख सकते हैं।"
+            : "You can check this puja's status anytime by entering your mobile number."}
+        </p>
 
-  await db
-    .update(adminUsers)
-    .set({
-      passwordHash: await hashPassword(next),
-      tokenVersion: user.tokenVersion + 1, // purane sessions turant band
-      updatedAt: new Date(),
-    })
-    .where(eq(adminUsers.id, user.id));
+        {/* -------- Details WhatsApp par bhejein -------- */}
+        {isConfirmed && (
+          <div className="mx-auto mt-6 max-w-md rounded-2xl border-2 border-dashed border-[#25D366]/40 bg-white/70 p-4">
+            <p className="text-[13.5px] font-bold text-maroon-800">
+              {lang === "hi"
+                ? "📲 अपना विवरण हमें भेज दें"
+                : "📲 Send your details to us"}
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink/60">
+              {lang === "hi"
+                ? "एक बार दबाइए — व्हाट्सएप खुलेगा और आपकी पूरी बुकिंग हमारे पास पहुँच जाएगी। इससे पंडित जी को आपका नाम, गोत्र और पूजा की तिथि मिल जाएगी।"
+                : "One tap — WhatsApp opens with your full booking ready to send. This gives our pandit ji your name, gotra and puja date."}
+            </p>
+            <a
+              href={saveDetailsLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-big mt-4 bg-[#25D366] text-white hover:brightness-105"
+            >
+              {lang === "hi" ? "व्हाट्सएप पर भेजें" : "Send on WhatsApp"}
+            </a>
+          </div>
+        )}
+      </div>
 
-  await destroySessionCookie();
-  redirect("/admin/login?changed=1");
-}
+      {/* Pending ho to page chup-chaap refresh hota rahega — jaise hi
+          Razorpay "paisa mil gaya" kahega, booking apne aap confirm dikhegi */}
+      {!isConfirmed && <PendingPaymentWatcher />}
 
-/* ------------------------------------------------------------------ */
-/*  Bookings                                                           */
-/* ------------------------------------------------------------------ */
+      {/* -------- Payment ke baad ke messages -------- */}
+      {paymentPending && (
+        <p className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-[14px] leading-relaxed text-amber-900">
+          ⏳{" "}
+          {lang === "hi"
+            ? "भुगतान की पुष्टि हो रही है। बैंक से जवाब आते ही आपकी बुकिंग अपने आप कन्फर्म हो जाएगी — यह पेज थोड़ी देर बाद दोबारा खोलें। पैसा कट गया हो तो चिंता न करें, राशि सुरक्षित है।"
+            : "Your payment is being confirmed. As soon as the bank responds your booking will confirm automatically — reopen this page in a little while. If money was deducted, it is safe."}
+        </p>
+      )}
 
-export async function updateBookingAction(
-  _prev: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const session = await getAdminSession();
-  if (!session) return { error: "Login zaroori hai." };
+      {paymentFailed && (
+        <div className="mt-5 rounded-2xl border border-red-300 bg-red-50 px-5 py-4 text-[14px] leading-relaxed text-red-800">
+          <p className="font-bold">
+            {lang === "hi" ? "भुगतान पूरा नहीं हुआ" : "Payment did not go through"}
+          </p>
+          <p className="mt-1">
+            {lang === "hi"
+              ? "आपकी बुकिंग सुरक्षित है। दोबारा प्रयास करें — कोई राशि नहीं कटी है।"
+              : "Your booking is saved. Please try again — no amount has been deducted."}
+          </p>
+          <Link href={`/pujas/${puja.slug}`} className="btn-primary mt-3 px-5 py-2.5">
+            {lang === "hi" ? "दोबारा भुगतान करें" : "Try payment again"}
+          </Link>
+        </div>
+      )}
 
-  const bookingId = String(formData.get("bookingId") ?? "");
-  if (!bookingId) return { error: "Booking ID missing." };
+      {/* -------- Details -------- */}
+      <div className="mt-8 grid gap-6 md:grid-cols-[1fr_1.1fr]">
+        <div className="card overflow-hidden">
+          <PujaImage
+            imageUrl={puja.imageUrl}
+            artKey={puja.artKey}
+            alt={title}
+            width={640}
+            className="aspect-[16/9] w-full"
+          />
+          <div className="p-5">
+            <h2 className="text-base leading-snug">{title}</h2>
+            {temple && (
+              <p className="mt-1.5 text-[12px] font-bold uppercase tracking-wide text-saffron-700">
+                {temple}
+              </p>
+            )}
 
-  const parsed = adminBookingUpdateSchema.safeParse({
-    status: formData.get("status"),
-    videoUrl: formData.get("videoUrl") ?? "",
-    prasadTracking: formData.get("prasadTracking") ?? "",
-    adminNote: formData.get("adminNote") ?? "",
-    notify: formData.get("notify") === "on",
-  });
-  if (!parsed.success) return { error: firstError(parsed.error) };
+            <dl className="mt-4 space-y-2.5 text-[13.5px]">
+              {[
+                { k: t.common.date, v: formatDate(puja.pujaDate, lang) },
+                { k: lang === "hi" ? "पैकेज" : "Package", v: pick(lang, pkg.nameEn, pkg.nameHi) },
+                { k: t.booking.name, v: booking.devoteeName },
+                { k: t.booking.gotra, v: booking.gotra },
+                ...(booking.memberNames.length
+                  ? [{ k: t.booking.members, v: booking.memberNames.join(", ") }]
+                  : []),
+                { k: t.booking.total, v: formatINR(booking.amountInPaise) },
+              ].map((row) => (
+                <div key={row.k} className="flex justify-between gap-4 border-b border-saffron-50 pb-2">
+                  <dt className="shrink-0 text-ink/55">{row.k}</dt>
+                  <dd className="text-right font-semibold text-maroon-800">{row.v}</dd>
+                </div>
+              ))}
+            </dl>
 
-  const updated = await changeBookingStatus({
-    bookingId,
-    status: parsed.data.status,
-    videoUrl: parsed.data.videoUrl || null,
-    prasadTracking: parsed.data.prasadTracking || null,
-    adminNote: parsed.data.adminNote || null,
-    notify: parsed.data.notify ?? true,
-  });
+            {extras.length > 0 && (
+              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
+                  {lang === "hi" ? "अतिरिक्त सामान / सेवा" : "Extra items & seva"}
+                </p>
+                <ul className="mt-2 space-y-1.5">
+                  {extras.map((x) => (
+                    <li key={x.id} className="flex justify-between gap-3 text-[13px]">
+                      <span className="text-ink/70">
+                        {x.kind === "DELIVERY" ? "📦" : "🪔"}{" "}
+                        {pick(lang, x.nameEn, x.nameHi)}
+                      </span>
+                      <span className="shrink-0 font-semibold text-maroon-800">
+                        {formatINR(x.priceInPaise)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
-  if (!updated) return { error: "Booking nahi mili." };
+            {booking.sankalp && (
+              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
+                  {t.booking.sankalp}
+                </p>
+                <p className="mt-1 text-[13px] leading-relaxed text-ink/70">
+                  {booking.sankalp}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
 
-  revalidatePath("/admin/bookings");
-  revalidatePath(`/admin/bookings/${bookingId}`);
-  return { success: "Booking update ho gayi." };
-}
+        <div>
+          <BookingTimeline lang={lang} status={booking.status} events={events} />
 
-/* ------------------------------------------------------------------ */
-/*  Pujas                                                              */
-/* ------------------------------------------------------------------ */
+          {booking.videoUrl && (
+            <a
+              href={booking.videoUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-primary mt-5 w-full py-3"
+            >
+              🎬 {lang === "hi" ? "पूजा वीडियो देखें" : "Watch Puja Video"}
+            </a>
+          )}
 
-function parseLines(value: FormDataEntryValue | null, max = 20): string[] {
-  return String(value ?? "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, max);
-}
+          {booking.prasadTracking && (
+            <p className="mt-4 rounded-xl border border-saffron-200 bg-white px-4 py-3 text-[13px]">
+              📦 {lang === "hi" ? "प्रसाद ट्रैकिंग" : "Prasad tracking"}:{" "}
+              <span className="font-bold text-maroon-800">{booking.prasadTracking}</span>
+            </p>
+          )}
 
-function parsePackagesFromForm(formData: FormData) {
-  const out: Array<Record<string, unknown>> = [];
-  for (let i = 0; i < 6; i++) {
-    const nameEn = String(formData.get(`pkg_${i}_nameEn`) ?? "").trim();
-    if (!nameEn) continue;
-    out.push({
-      id: String(formData.get(`pkg_${i}_id`) ?? "") || undefined,
-      nameEn,
-      nameHi: String(formData.get(`pkg_${i}_nameHi`) ?? "").trim() || nameEn,
-      priceInPaise: Math.round(Number(formData.get(`pkg_${i}_price`) ?? 0) * 100),
-      mrpInPaise: formData.get(`pkg_${i}_mrp`)
-        ? Math.round(Number(formData.get(`pkg_${i}_mrp`)) * 100)
-        : null,
-      maxMembers: Number(formData.get(`pkg_${i}_maxMembers`) ?? 1),
-      featuresEn: parseLines(formData.get(`pkg_${i}_featuresEn`), 15),
-      featuresHi: parseLines(formData.get(`pkg_${i}_featuresHi`), 15),
-      isPopular: formData.get(`pkg_${i}_isPopular`) === "on",
-      isActive: true,
-      order: i,
-    });
-  }
-  return out;
-}
-
-/** Slug banao aur unique bana do (agar pehle se hai to -2, -3 lagao) */
-async function uniqueSlug(
-  base: string,
-  exists: (slug: string) => Promise<boolean>,
-): Promise<string> {
-  const root = slugify(base) || "item";
-  let candidate = root;
-  for (let i = 2; i < 50; i++) {
-    if (!(await exists(candidate))) return candidate;
-    candidate = `${root}-${i}`;
-  }
-  return `${root}-${Date.now()}`;
-}
-
-/**
- * Mandir ka naam type kiya gaya hai —
- * pehle se hai to wahi lelo, naya hai to bana do.
- */
-async function findOrCreateTemple(input: {
-  nameEn: string;
-  nameHi: string;
-  cityEn: string;
-  cityHi: string;
-  stateEn: string;
-  stateHi: string;
-}): Promise<string | null> {
-  const nameEn = input.nameEn.trim();
-  if (!nameEn) return null;
-
-  const [existing] = await db
-    .select({ id: temples.id })
-    .from(temples)
-    .where(sql`lower(${temples.nameEn}) = lower(${nameEn})`)
-    .limit(1);
-
-  if (existing) return existing.id;
-
-  const slug = await uniqueSlug(nameEn, async (s) => {
-    const [row] = await db
-      .select({ id: temples.id })
-      .from(temples)
-      .where(eq(temples.slug, s))
-      .limit(1);
-    return Boolean(row);
-  });
-
-  const [created] = await db
-    .insert(temples)
-    .values({
-      slug,
-      nameEn,
-      nameHi: input.nameHi.trim() || nameEn,
-      cityEn: input.cityEn.trim() || "—",
-      cityHi: input.cityHi.trim() || input.cityEn.trim() || "—",
-      stateEn: input.stateEn.trim() || "India",
-      stateHi: input.stateHi.trim() || input.stateEn.trim() || "भारत",
-    })
-    .returning({ id: temples.id });
-
-  return created.id;
-}
-
-/** Category ka naam type kiya gaya hai — pehle se hai to wahi, warna nayi ban jayegi */
-async function findOrCreateCategory(
-  nameEn: string,
-  nameHi: string,
-): Promise<string | null> {
-  const clean = nameEn.trim();
-  if (!clean) return null;
-
-  const [existing] = await db
-    .select({ id: categories.id })
-    .from(categories)
-    .where(sql`lower(${categories.nameEn}) = lower(${clean})`)
-    .limit(1);
-
-  if (existing) return existing.id;
-
-  const slug = await uniqueSlug(clean, async (s) => {
-    const [row] = await db
-      .select({ id: categories.id })
-      .from(categories)
-      .where(eq(categories.slug, s))
-      .limit(1);
-    return Boolean(row);
-  });
-
-  const [created] = await db
-    .insert(categories)
-    .values({ slug, nameEn: clean, nameHi: nameHi.trim() || clean, order: 99 })
-    .returning({ id: categories.id });
-
-  return created.id;
-}
-
-export async function savePujaAction(
-  _prev: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const session = await getAdminSession();
-  if (!session) return { error: "Login zaroori hai." };
-
-  const pujaId = String(formData.get("pujaId") ?? "");
-
-  const parsed = adminPujaSchema.safeParse({
-    slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
-    titleEn: formData.get("titleEn"),
-    titleHi: formData.get("titleHi"),
-    subtitleEn: formData.get("subtitleEn") ?? "",
-    subtitleHi: formData.get("subtitleHi") ?? "",
-    descriptionEn: formData.get("descriptionEn") ?? "",
-    descriptionHi: formData.get("descriptionHi") ?? "",
-    benefitsEn: parseLines(formData.get("benefitsEn")),
-    benefitsHi: parseLines(formData.get("benefitsHi")),
-    ritualsEn: parseLines(formData.get("ritualsEn")),
-    ritualsHi: parseLines(formData.get("ritualsHi")),
-    artKey: formData.get("artKey") ?? "om",
-    imageUrl: formData.get("imageUrl") ?? "",
-    addonIds: formData.getAll("addonIds").map((v) => String(v)),
-    pujaDate: formData.get("pujaDate"),
-    templeName: formData.get("templeName") ?? "",
-    templeNameHi: formData.get("templeNameHi") ?? "",
-    templeCity: formData.get("templeCity") ?? "",
-    templeCityHi: formData.get("templeCityHi") ?? "",
-    templeState: formData.get("templeState") ?? "",
-    templeStateHi: formData.get("templeStateHi") ?? "",
-    categoryName: formData.get("categoryName") ?? "",
-    categoryNameHi: formData.get("categoryNameHi") ?? "",
-    isFeatured: formData.get("isFeatured") === "on",
-    isActive: formData.get("isActive") === "on",
-    seatsTotal: formData.get("seatsTotal") ? Number(formData.get("seatsTotal")) : null,
-    order: Number(formData.get("order") ?? 0),
-    packages: parsePackagesFromForm(formData),
-  });
-
-  if (!parsed.success) return { error: firstError(parsed.error) };
-  const data = parsed.data;
-
-  const pujaDate = new Date(data.pujaDate);
-  if (Number.isNaN(pujaDate.getTime())) return { error: "Puja ki tareekh sahi nahi hai." };
-
-  // Mandir aur category: naam se dhoondo, na mile to naya bana do
-  const templeId = await findOrCreateTemple({
-    nameEn: data.templeName,
-    nameHi: data.templeNameHi,
-    cityEn: data.templeCity,
-    cityHi: data.templeCityHi,
-    stateEn: data.templeState,
-    stateHi: data.templeStateHi,
-  });
-  const categoryId = await findOrCreateCategory(data.categoryName, data.categoryNameHi);
-
-  const values = {
-    slug: data.slug,
-    titleEn: data.titleEn,
-    titleHi: data.titleHi,
-    subtitleEn: data.subtitleEn,
-    subtitleHi: data.subtitleHi,
-    descriptionEn: data.descriptionEn,
-    descriptionHi: data.descriptionHi,
-    benefitsEn: data.benefitsEn,
-    benefitsHi: data.benefitsHi,
-    ritualsEn: data.ritualsEn,
-    ritualsHi: data.ritualsHi,
-    artKey: data.artKey,
-    imageUrl: data.imageUrl || null,
-    pujaDate,
-    templeId,
-    categoryId,
-    isFeatured: data.isFeatured,
-    isActive: data.isActive,
-    seatsTotal: data.seatsTotal ?? null,
-    order: data.order,
-    updatedAt: new Date(),
-  };
-
-  let savedId = pujaId;
-
-  try {
-    if (pujaId) {
-      await db.update(pujas).set(values).where(eq(pujas.id, pujaId));
-    } else {
-      const [created] = await db.insert(pujas).values(values).returning({ id: pujas.id });
-      savedId = created.id;
-    }
-  } catch (err) {
-    const msg = String(err);
-    if (msg.includes("pujas_slug_key") || msg.includes("duplicate key")) {
-      return { error: "Ye URL slug pehle se use ho raha hai. Koi doosra rakhein." };
-    }
-    console.error("[admin] puja save failed:", err);
-    return { error: "Save nahi ho paya. Dobara koshish karein." };
-  }
-
-  // Packages: purane hata kar naye daal do (bookings package se juda hai,
-  // isliye purane package delete nahi karte — unhe inactive kar dete hain)
-  const existing = await db
-    .select({ id: packages.id })
-    .from(packages)
-    .where(eq(packages.pujaId, savedId));
-
-  const keepIds = new Set(
-    data.packages.map((p) => p.id).filter((v): v is string => Boolean(v)),
+          <div className="mt-5 flex flex-wrap gap-3">
+            <a
+              href={`https://wa.me/${waNumber}?text=${encodeURIComponent(
+                `Booking ${booking.bookingCode}`,
+              )}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn rounded-full bg-[#25D366] px-5 py-2.5 text-sm font-bold text-white hover:brightness-105"
+            >
+              {t.cta.talkToUs}
+            </a>
+            <Link href="/pujas" className="btn-secondary">
+              {t.cta.viewAll}
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
   );
-
-  for (const old of existing) {
-    if (!keepIds.has(old.id)) {
-      await db.update(packages).set({ isActive: false }).where(eq(packages.id, old.id));
-    }
-  }
-
-  for (const p of data.packages) {
-    const pkgValues = {
-      pujaId: savedId,
-      nameEn: p.nameEn,
-      nameHi: p.nameHi,
-      priceInPaise: p.priceInPaise,
-      mrpInPaise: p.mrpInPaise ?? null,
-      maxMembers: p.maxMembers,
-      featuresEn: p.featuresEn,
-      featuresHi: p.featuresHi,
-      isPopular: p.isPopular,
-      isActive: p.isActive,
-      order: p.order,
-    };
-    if (p.id) {
-      await db.update(packages).set(pkgValues).where(eq(packages.id, p.id));
-    } else {
-      await db.insert(packages).values(pkgValues);
-    }
-  }
-
-  // Puja ke saath kaunse add-ons dikhein — dobara set kar dete hain
-  await db.delete(pujaAddons).where(eq(pujaAddons.pujaId, savedId));
-  if (data.addonIds.length > 0) {
-    const valid = await db
-      .select({ id: addons.id })
-      .from(addons)
-      .where(inArray(addons.id, data.addonIds));
-
-    if (valid.length > 0) {
-      await db.insert(pujaAddons).values(
-        valid.map((a, i) => ({ pujaId: savedId, addonId: a.id, order: i })),
-      );
-    }
-  }
-
-  revalidatePath("/admin/pujas");
-  revalidatePath("/pujas");
-  revalidatePath(`/pujas/${data.slug}`);
-  redirect("/admin/pujas?saved=1");
 }
+</file>
 
-/* ------------------------------------------------------------------ */
-/*  Add-ons                                                            */
-/* ------------------------------------------------------------------ */
+<file path="src/app/admin/(panel)/page.tsx">
+import Link from "next/link";
+import { desc, eq, gte, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { activeProvider } from "@/lib/payments";
+import { bookings, contactMessages, pujas } from "@/db/schema";
+import { formatDate, formatINR } from "@/lib/utils";
+import {whatsappProvider} from "@/lib/env";
+import StatusBadge from "./StatusBadge";
 
-export async function saveAddonAction(
-  _prev: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const session = await getAdminSession();
-  if (!session) return { error: "Login zaroori hai." };
+export const dynamic = "force-dynamic";
 
-  const addonId = String(formData.get("addonId") ?? "");
+export default async function AdminDashboard() {
+  const [[stats], recent, [msgCount]] = await Promise.all([
+    db
+      .select({
+        total: sql<number>`COUNT(*)`.mapWith(Number),
+        confirmed: sql<number>`COUNT(*) FILTER (WHERE ${bookings.status} <> 'PENDING_PAYMENT' AND ${bookings.status} <> 'CANCELLED')`.mapWith(Number),
+        pending: sql<number>`COUNT(*) FILTER (WHERE ${bookings.status} = 'PENDING_PAYMENT')`.mapWith(Number),
+        revenue: sql<number>`COALESCE(SUM(${bookings.amountInPaise}) FILTER (WHERE ${bookings.status} <> 'PENDING_PAYMENT' AND ${bookings.status} <> 'CANCELLED' AND ${bookings.status} <> 'REFUNDED'), 0)`.mapWith(Number),
+        last30: sql<number>`COUNT(*) FILTER (WHERE ${bookings.createdAt} >= now() - interval '30 days')`.mapWith(Number),
+      })
+      .from(bookings),
+    db
+      .select({
+        id: bookings.id,
+        code: bookings.bookingCode,
+        name: bookings.devoteeName,
+        phone: bookings.phone,
+        amount: bookings.amountInPaise,
+        status: bookings.status,
+        createdAt: bookings.createdAt,
+        pujaTitle: pujas.titleEn,
+      })
+      .from(bookings)
+      .innerJoin(pujas, eq(bookings.pujaId, pujas.id))
+      .orderBy(desc(bookings.createdAt))
+      .limit(8),
+    db
+      .select({ unread: sql<number>`COUNT(*) FILTER (WHERE ${contactMessages.isRead} = false)`.mapWith(Number) })
+      .from(contactMessages),
+  ]);
 
-  const parsed = adminAddonSchema.safeParse({
-    slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
-    nameEn: formData.get("nameEn"),
-    nameHi: formData.get("nameHi"),
-    descEn: formData.get("descEn") ?? "",
-    descHi: formData.get("descHi") ?? "",
-    priceInPaise: Math.round(Number(formData.get("price") ?? 0) * 100),
-    imageUrl: formData.get("imageUrl") ?? "",
-    artKey: formData.get("artKey") ?? "kalash",
-    kind: formData.get("kind") ?? "SERVICE",
-    isActive: formData.get("isActive") === "on",
-    order: Number(formData.get("order") ?? 0),
-  });
-
-  if (!parsed.success) return { error: firstError(parsed.error) };
-  const d = parsed.data;
-
-  const values = {
-    slug: d.slug,
-    nameEn: d.nameEn,
-    nameHi: d.nameHi,
-    descEn: d.descEn,
-    descHi: d.descHi,
-    priceInPaise: d.priceInPaise,
-    imageUrl: d.imageUrl || null,
-    artKey: d.artKey,
-    kind: d.kind,
-    isActive: d.isActive,
-    order: d.order,
-    updatedAt: new Date(),
-  };
-
-  try {
-    if (addonId) {
-      await db.update(addons).set(values).where(eq(addons.id, addonId));
-    } else {
-      await db.insert(addons).values(values);
-    }
-  } catch (err) {
-    const msg = String(err);
-    if (msg.includes("addons_slug_key") || msg.includes("duplicate key")) {
-      return { error: "Ye slug pehle se use ho raha hai. Koi doosra rakhein." };
-    }
-    console.error("[admin] addon save failed:", err);
-    return { error: "Save nahi ho paya. Dobara koshish karein." };
-  }
-
-  revalidatePath("/admin/addons");
-  revalidatePath("/pujas");
-  redirect("/admin/addons?saved=1");
-}
-
-export async function toggleAddonActiveAction(formData: FormData) {
-  const session = await getAdminSession();
-  if (!session) redirect("/admin/login");
-
-  const id = String(formData.get("addonId") ?? "");
-  const next = String(formData.get("next") ?? "") === "true";
-  if (!id) return;
-
-  await db
-    .update(addons)
-    .set({ isActive: next, updatedAt: new Date() })
-    .where(eq(addons.id, id));
-
-  revalidatePath("/admin/addons");
-  revalidatePath("/pujas");
-}
-
-export async function deleteAddonAction(formData: FormData) {
-  const session = await getAdminSession();
-  if (!session) redirect("/admin/login");
-
-  const id = String(formData.get("addonId") ?? "");
-  if (!id) return;
-
-  try {
-    await db.delete(addons).where(eq(addons.id, id));
-  } catch {
-    await db.update(addons).set({ isActive: false }).where(eq(addons.id, id));
-  }
-
-  revalidatePath("/admin/addons");
-  revalidatePath("/pujas");
-}
-
-export async function togglePujaActiveAction(formData: FormData) {
-  const session = await getAdminSession();
-  if (!session) redirect("/admin/login");
-
-  const id = String(formData.get("pujaId") ?? "");
-  const next = String(formData.get("next") ?? "") === "true";
-  if (!id) return;
-
-  await db
-    .update(pujas)
-    .set({ isActive: next, updatedAt: new Date() })
-    .where(eq(pujas.id, id));
-
-  revalidatePath("/admin/pujas");
-  revalidatePath("/pujas");
-}
-
-/**
- * Puja delete.
- *
- * Normal delete tabhi hoti hai jab us puja par ek bhi booking na ho —
- * warna purani bookings ka record toot jayega. Bookings hone par saaf
- * message dikhta hai, aur chahein to "force" se bookings samet delete
- * kar sakte hain (admin ko dobara confirm karna padta hai).
- */
-export async function deletePujaAction(formData: FormData) {
-  const session = await getAdminSession();
-  if (!session) redirect("/admin/login");
-
-  const id = String(formData.get("pujaId") ?? "");
-  const force = String(formData.get("force") ?? "") === "true";
-  if (!id) redirect("/admin/pujas");
-
-  const [row] = await db
+  const [activePujas] = await db
     .select({
-      count: sql<number>`COUNT(*)`.mapWith(Number),
+      n: sql<number>`COUNT(*) FILTER (WHERE ${pujas.isActive} = true)`.mapWith(Number),
     })
-    .from(bookings)
-    .where(eq(bookings.pujaId, id));
+    .from(pujas);
 
-  const bookingCount = row?.count ?? 0;
+  const cards = [
+    { label: "Total bookings", value: stats.total, tone: "text-maroon-800" },
+    { label: "Confirmed", value: stats.confirmed, tone: "text-green-700" },
+    { label: "Payment pending", value: stats.pending, tone: "text-amber-700" },
+    { label: "Revenue (confirmed)", value: formatINR(stats.revenue), tone: "text-saffron-700" },
+    { label: "Bookings (30 days)", value: stats.last30, tone: "text-maroon-800" },
+    { label: "Active pujas", value: activePujas.n, tone: "text-maroon-800" },
+  ];
 
-  if (bookingCount > 0 && !force) {
-    revalidatePath("/admin/pujas");
-    redirect(`/admin/pujas?blocked=${bookingCount}`);
-  }
+  const waProvider = whatsappProvider();
+  const payProvider = activeProvider();
 
-  if (force && bookingCount > 0) {
-    // pehle bookings (aur unke add-ons/events cascade se) hatao
-    await db.delete(bookings).where(eq(bookings.pujaId, id));
-  }
+  return (
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-2xl">Dashboard</h1>
+        <p className="mt-1 text-[14px] text-ink/55">Aaj ki sthiti ek nazar mein</p>
+      </div>
 
-  await db.delete(pujas).where(eq(pujas.id, id));
+      {/* Pending bookings — inme se kuch ka paisa aa chuka ho sakta hai */}
+      {stats.pending > 0 && (
+        <Link
+          href="/admin/payments"
+          className="block rounded-2xl border border-amber-300 bg-amber-50 p-4 transition hover:bg-amber-100"
+        >
+          <p className="text-[13.5px] font-bold text-amber-900">
+            ⏳ {stats.pending} booking “Payment pending” me hai — Payments page kholein
+          </p>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-amber-800">
+            Page kholte hi hum har booking ke liye seedha gateway se poochh lenge ki paisa
+            aaya ya nahi. Jinka paisa aa chuka hai wo wahin confirm ho jayengi. →
+          </p>
+        </Link>
+      )}
 
-  revalidatePath("/admin/pujas");
-  revalidatePath("/pujas");
-  redirect("/admin/pujas?deleted=1");
+      {/* Setup warnings */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        {payProvider === "none" && (
+          <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
+            <p className="text-[13px] font-bold text-amber-900">
+              ⚠️ Payment gateway connect nahi hai
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-amber-800">
+              Site abhi Demo Mode me hai — booking ban jati hai par paisa nahi katta.
+              Render ke Environment tab me <code>RAZORPAY_KEY_ID</code> aur{" "}
+              <code>RAZORPAY_KEY_SECRET</code> daal kar redeploy karein.
+            </p>
+          </div>
+        )}
+        {payProvider !== "none" && (
+          <div className="rounded-2xl border border-green-300 bg-green-50 p-4">
+            <p className="text-[13px] font-bold text-green-900">
+              ✓ Payment gateway chalu hai ({payProvider})
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-green-800">
+              Bookings par asli payment liya ja raha hai.
+              {payProvider === "razorpay" && (
+                <>
+                  {" "}Webhook URL: <code>/api/payment/webhook</code>
+                </>
+              )}
+            </p>
+          </div>
+        )}
+        {waProvider === "none" && (
+          <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+            <p className="text-[13px] font-bold text-blue-900">ℹ️ WhatsApp updates band hain</p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-blue-800">
+              Message abhi sirf server log me jate hain. AiSensy/Interakt ki API key{" "}
+              <code>.env</code> me daalte hi apne aap chalu ho jayenge.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Stats */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {cards.map((c) => (
+          <div key={c.label} className="card p-5">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-ink/45">
+              {c.label}
+            </p>
+            <p className={`mt-2 font-display text-2xl font-bold ${c.tone}`}>{c.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Recent bookings */}
+      <section className="card overflow-hidden">
+        <div className="flex items-center justify-between border-b border-saffron-100 px-5 py-4">
+          <h2 className="text-lg">Recent bookings</h2>
+          <Link href="/admin/bookings" className="text-[13px] font-semibold text-saffron-700">
+            Sabhi dekhein →
+          </Link>
+        </div>
+
+        {recent.length === 0 ? (
+          <p className="p-8 text-center text-[14px] text-ink/50">Abhi koi booking nahi hai.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[13.5px]">
+              <thead className="bg-saffron-50/60 text-left text-[11px] uppercase tracking-wide text-ink/50">
+                <tr>
+                  <th className="px-5 py-2.5 font-bold">Booking ID</th>
+                  <th className="px-5 py-2.5 font-bold">Devotee</th>
+                  <th className="px-5 py-2.5 font-bold">Puja</th>
+                  <th className="px-5 py-2.5 font-bold">Amount</th>
+                  <th className="px-5 py-2.5 font-bold">Status</th>
+                  <th className="px-5 py-2.5 font-bold">Date</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-saffron-50">
+                {recent.map((b) => (
+                  <tr key={b.id} className="hover:bg-saffron-50/40">
+                    <td className="px-5 py-3">
+                      <Link
+                        href={`/admin/bookings/${b.id}`}
+                        className="font-mono text-[12.5px] font-bold text-saffron-700"
+                      >
+                        {b.code}
+                      </Link>
+                    </td>
+                    <td className="px-5 py-3">
+                      <p className="font-semibold text-maroon-800">{b.name}</p>
+                      <p className="text-[12px] text-ink/50">{b.phone}</p>
+                    </td>
+                    <td className="max-w-[220px] truncate px-5 py-3 text-ink/70">{b.pujaTitle}</td>
+                    <td className="px-5 py-3 font-semibold">{formatINR(b.amount)}</td>
+                    <td className="px-5 py-3">
+                      <StatusBadge status={b.status} />
+                    </td>
+                    <td className="whitespace-nowrap px-5 py-3 text-[12.5px] text-ink/55">
+                      {formatDate(b.createdAt, "en")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {msgCount.unread > 0 && (
+        <Link
+          href="/admin/messages"
+          className="card block bg-saffron-50 p-4 text-[14px] font-semibold text-maroon-800"
+        >
+          📩 {msgCount.unread} naye contact message padhe nahi gaye →
+        </Link>
+      )}
+    </div>
+  );
 }
 </file>
 
@@ -14938,6 +15977,216 @@ export default function BookingWizard({
 }
 </file>
 
+<file path="src/lib/payments/razorpay.ts">
+import "server-only";
+
+import { createHmac, timingSafeEqual } from "node:crypto";
+import Razorpay from "razorpay";
+
+
+export function isRazorpayLive(): boolean {
+  return Boolean(
+    process.env.RAZORPAY_KEY_ID?.trim() && process.env.RAZORPAY_KEY_SECRET?.trim(),
+  );
+}
+
+let client: Razorpay | null = null;
+
+function getClient(): Razorpay {
+  if (!isRazorpayLive()) {
+    throw new Error("Razorpay keys .env me set nahi hain.");
+  }
+  if (!client) {
+    client = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID!,
+      key_secret: process.env.RAZORPAY_KEY_SECRET!,
+    });
+  }
+  return client;
+}
+
+export type CreatedOrder = {
+  orderId: string;
+  amount: number;
+  currency: string;
+  keyId: string;
+};
+
+export async function createOrder(params: {
+  amountInPaise: number;
+  receipt: string;
+  notes?: Record<string, string>;
+}): Promise<CreatedOrder> {
+  const order = await getClient().orders.create({
+    amount: params.amountInPaise,
+    currency: "INR",
+    receipt: params.receipt.slice(0, 40),
+    payment_capture: true,
+    notes: params.notes,
+  });
+
+  return {
+    orderId: order.id,
+    amount: Number(order.amount),
+    currency: order.currency,
+    keyId: process.env.RAZORPAY_KEY_ID!,
+  };
+}
+
+/** Checkout ke baad browser se aaya signature verify karo */
+export function verifyCheckoutSignature(input: {
+  orderId: string;
+  paymentId: string;
+  signature: string;
+}): boolean {
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret) return false;
+
+  const expected = createHmac("sha256", secret)
+    .update(`${input.orderId}|${input.paymentId}`)
+    .digest("hex");
+
+  return safeCompareHex(expected, input.signature);
+}
+
+/** Razorpay webhook ka signature verify karo (raw body chahiye) */
+export function verifyWebhookSignature(rawBody: string, signature: string | null): boolean {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret || !signature) return false;
+
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  return safeCompareHex(expected, signature);
+}
+
+/** Payment ki asli sthiti Razorpay se confirm karo (bharosa server par) */
+export async function fetchPayment(paymentId: string) {
+  return getClient().payments.fetch(paymentId);
+}
+
+export type OrderPayment = {
+  id: string;
+  status: string; // created | authorized | captured | refunded | failed
+  amount: number;
+  method?: string | null;
+  errorDescription?: string | null;
+  createdAt: number | null;
+};
+
+/**
+ * Ek order par ab tak jitni bhi payment koshishein hui hain, sab.
+ *
+ * Ye reconcile ke liye sabse bharosemand tareeka hai: booking ke paas
+ * sirf order id hoti hai (payment id tabhi milti hai jab browser wapas
+ * aata hai). Browser wapas na aaye — user ne UPI app me paisa de diya aur
+ * tab band kar di — to bhi order se payment dhoondh kar booking confirm
+ * ho jati hai.
+ */
+export async function fetchOrderPayments(orderId: string): Promise<OrderPayment[]> {
+  const res = (await getClient().orders.fetchPayments(orderId)) as unknown as {
+    items?: Array<{
+      id: string;
+      status: string;
+      amount: number | string;
+      method?: string;
+      error_description?: string | null;
+      created_at?: number;
+    }>;
+  };
+
+  return (res?.items ?? []).map((p) => ({
+    id: p.id,
+    status: String(p.status),
+    amount: Number(p.amount),
+    method: p.method ?? null,
+    errorDescription: p.error_description ?? null,
+    createdAt: p.created_at ?? null,
+  }));
+}
+
+/** Order khud kya kehta hai — `paid` hone par amount_paid pura ho jata hai */
+export async function fetchOrder(orderId: string) {
+  return getClient().orders.fetch(orderId);
+}
+
+export type RecentPayment = OrderPayment & {
+  orderId: string | null;
+  bookingCodeHint: string | null;
+  contact: string | null;
+  email: string | null;
+};
+
+/**
+ * Razorpay par aayi pichhli payments — ulti taraf se milaan ke liye.
+ *
+ * `fetchOrderPayments` humari booking se shuru hoti hai. Lekin agar kisi
+ * wajah se booking par order id save hi na hui ho, to us raaste se wo
+ * payment kabhi nahi milegi. Isliye ye function Razorpay ki taraf se
+ * shuru karta hai: "tumhare paas kya-kya aaya hai?" — phir hum har payment
+ * ko apni booking se jodne ki koshish karte hain.
+ */
+export async function fetchRecentPayments(count = 25): Promise<RecentPayment[]> {
+  const res = (await getClient().payments.all({
+    count: Math.min(Math.max(count, 1), 100),
+  })) as unknown as {
+    items?: Array<{
+      id: string;
+      status: string;
+      amount: number | string;
+      method?: string;
+      order_id?: string | null;
+      error_description?: string | null;
+      created_at?: number;
+      contact?: string | number | null;
+      email?: string | null;
+      notes?: Record<string, string> | null;
+    }>;
+  };
+
+  return (res?.items ?? []).map((p) => ({
+    id: p.id,
+    status: String(p.status),
+    amount: Number(p.amount),
+    method: p.method ?? null,
+    errorDescription: p.error_description ?? null,
+    createdAt: p.created_at ?? null,
+    orderId: p.order_id ?? null,
+    bookingCodeHint: p.notes?.bookingCode ?? null,
+    contact: p.contact != null ? String(p.contact) : null,
+    email: p.email ?? null,
+  }));
+}
+
+/** Sirf dikhane ke liye — poori key kabhi log/screen par nahi jani chahiye */
+export function maskedKeyId(): string {
+  const k = process.env.RAZORPAY_KEY_ID?.trim();
+  if (!k) return "";
+  return k.length <= 10 ? k : `${k.slice(0, 8)}…${k.slice(-4)}`;
+}
+
+/** Test key ya live key? Galti pakadne me bahut kaam aata hai */
+export function keyMode(): "test" | "live" | "unknown" {
+  const k = process.env.RAZORPAY_KEY_ID?.trim() ?? "";
+  if (k.startsWith("rzp_test")) return "test";
+  if (k.startsWith("rzp_live")) return "live";
+  return "unknown";
+}
+
+export function hasWebhookSecret(): boolean {
+  return Boolean(process.env.RAZORPAY_WEBHOOK_SECRET?.trim());
+}
+
+function safeCompareHex(a: string, b: string): boolean {
+  try {
+    const ab = Buffer.from(a, "hex");
+    const bb = Buffer.from(b, "hex");
+    if (ab.length === 0 || ab.length !== bb.length) return false;
+    return timingSafeEqual(ab, bb);
+  } catch {
+    return false;
+  }
+}
+</file>
+
 <file path="src/lib/validation.ts">
 import { z } from "zod";
 
@@ -15683,6 +16932,737 @@ const nextConfig: NextConfig = {
 export default nextConfig;
 </file>
 
+<file path="src/app/admin/actions.ts">
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { headers } from "next/headers";
+import { eq, inArray, sql } from "drizzle-orm";
+import { db } from "@/db";
+import {
+  addons,
+  adminUsers,
+  bookings,
+  categories,
+  packages,
+  pujaAddons,
+  pujas,
+  temples,
+} from "@/db/schema";
+import {
+  attemptLogin,
+  createSessionCookie,
+  destroySessionCookie,
+  getAdminSession,
+  hashPassword,
+  verifyPassword,
+} from "@/lib/auth";
+import { rateLimit } from "@/lib/rate-limit";
+import {
+  adminAddonSchema,
+  adminBookingUpdateSchema,
+  adminPujaSchema,
+  firstError,
+  loginSchema,
+} from "@/lib/validation";
+import { changeBookingStatus, confirmBookingPaid } from "@/lib/booking-service";
+import {
+  attachPayment,
+  cleanupAbandoned,
+  confirmAllPaidFromGateway,
+  reconcileBookingById,
+} from "@/lib/payments/reconcile";
+import { slugify } from "@/lib/utils";
+
+export type ActionState = { error?: string; success?: string };
+
+async function ipKey() {
+  const h = await headers();
+  const fwd = h.get("x-forwarded-for");
+  return fwd?.split(",")[0].trim() || h.get("x-real-ip") || "unknown";
+}
+
+/* ------------------------------------------------------------------ */
+/*  Auth                                                               */
+/* ------------------------------------------------------------------ */
+
+export async function loginAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const ip = await ipKey();
+  const limit = rateLimit(`admin-login:${ip}`, {
+    limit: 6,
+    windowMs: 15 * 60_000,
+    blockMs: 30 * 60_000,
+  });
+  if (!limit.ok) {
+    return {
+      error: `Bahut zyada koshishein. ${Math.ceil(limit.retryAfterSeconds / 60)} minute baad try karein.`,
+    };
+  }
+
+  const parsed = loginSchema.safeParse({
+    email: formData.get("email"),
+    password: formData.get("password"),
+  });
+  if (!parsed.success) return { error: "Email aur password sahi daalein." };
+
+  const result = await attemptLogin(parsed.data.email, parsed.data.password);
+
+  if (!result.ok) {
+    if (result.reason === "locked") {
+      return {
+        error: `Account ${result.minutes} minute ke liye lock hai (bahut galat koshishein).`,
+      };
+    }
+    if (result.reason === "disabled") return { error: "Ye account band kar diya gaya hai." };
+    return { error: "Email ya password galat hai." };
+  }
+
+  await createSessionCookie(result.session);
+  redirect("/admin");
+}
+
+export async function logoutAction() {
+  await destroySessionCookie();
+  redirect("/admin/login");
+}
+
+export async function changePasswordAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const session = await getAdminSession();
+  if (!session) return { error: "Login zaroori hai." };
+
+  const current = String(formData.get("currentPassword") ?? "");
+  const next = String(formData.get("newPassword") ?? "");
+  const confirm = String(formData.get("confirmPassword") ?? "");
+
+  if (next.length < 10) return { error: "Naya password kam se kam 10 character ka rakhein." };
+  if (next !== confirm) return { error: "Dono naye password match nahi kar rahe." };
+  if (next === current) return { error: "Naya password purane se alag rakhein." };
+
+  const [user] = await db
+    .select()
+    .from(adminUsers)
+    .where(eq(adminUsers.id, session.sub))
+    .limit(1);
+  if (!user) return { error: "Account nahi mila." };
+
+  if (!(await verifyPassword(current, user.passwordHash))) {
+    return { error: "Purana password galat hai." };
+  }
+
+  await db
+    .update(adminUsers)
+    .set({
+      passwordHash: await hashPassword(next),
+      tokenVersion: user.tokenVersion + 1, // purane sessions turant band
+      updatedAt: new Date(),
+    })
+    .where(eq(adminUsers.id, user.id));
+
+  await destroySessionCookie();
+  redirect("/admin/login?changed=1");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Bookings                                                           */
+/* ------------------------------------------------------------------ */
+
+export async function updateBookingAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const session = await getAdminSession();
+  if (!session) return { error: "Login zaroori hai." };
+
+  const bookingId = String(formData.get("bookingId") ?? "");
+  if (!bookingId) return { error: "Booking ID missing." };
+
+  const parsed = adminBookingUpdateSchema.safeParse({
+    status: formData.get("status"),
+    videoUrl: formData.get("videoUrl") ?? "",
+    prasadTracking: formData.get("prasadTracking") ?? "",
+    adminNote: formData.get("adminNote") ?? "",
+    notify: formData.get("notify") === "on",
+  });
+  if (!parsed.success) return { error: firstError(parsed.error) };
+
+  const updated = await changeBookingStatus({
+    bookingId,
+    status: parsed.data.status,
+    videoUrl: parsed.data.videoUrl || null,
+    prasadTracking: parsed.data.prasadTracking || null,
+    adminNote: parsed.data.adminNote || null,
+    notify: parsed.data.notify ?? true,
+  });
+
+  if (!updated) return { error: "Booking nahi mili." };
+
+  revalidatePath("/admin/bookings");
+  revalidatePath(`/admin/bookings/${bookingId}`);
+  return { success: "Booking update ho gayi." };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Pujas                                                              */
+/* ------------------------------------------------------------------ */
+
+function parseLines(value: FormDataEntryValue | null, max = 20): string[] {
+  return String(value ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function parsePackagesFromForm(formData: FormData) {
+  const out: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < 6; i++) {
+    const nameEn = String(formData.get(`pkg_${i}_nameEn`) ?? "").trim();
+    if (!nameEn) continue;
+    out.push({
+      id: String(formData.get(`pkg_${i}_id`) ?? "") || undefined,
+      nameEn,
+      nameHi: String(formData.get(`pkg_${i}_nameHi`) ?? "").trim() || nameEn,
+      priceInPaise: Math.round(Number(formData.get(`pkg_${i}_price`) ?? 0) * 100),
+      mrpInPaise: formData.get(`pkg_${i}_mrp`)
+        ? Math.round(Number(formData.get(`pkg_${i}_mrp`)) * 100)
+        : null,
+      maxMembers: Number(formData.get(`pkg_${i}_maxMembers`) ?? 1),
+      featuresEn: parseLines(formData.get(`pkg_${i}_featuresEn`), 15),
+      featuresHi: parseLines(formData.get(`pkg_${i}_featuresHi`), 15),
+      isPopular: formData.get(`pkg_${i}_isPopular`) === "on",
+      isActive: true,
+      order: i,
+    });
+  }
+  return out;
+}
+
+/** Slug banao aur unique bana do (agar pehle se hai to -2, -3 lagao) */
+async function uniqueSlug(
+  base: string,
+  exists: (slug: string) => Promise<boolean>,
+): Promise<string> {
+  const root = slugify(base) || "item";
+  let candidate = root;
+  for (let i = 2; i < 50; i++) {
+    if (!(await exists(candidate))) return candidate;
+    candidate = `${root}-${i}`;
+  }
+  return `${root}-${Date.now()}`;
+}
+
+/**
+ * Mandir ka naam type kiya gaya hai —
+ * pehle se hai to wahi lelo, naya hai to bana do.
+ */
+async function findOrCreateTemple(input: {
+  nameEn: string;
+  nameHi: string;
+  cityEn: string;
+  cityHi: string;
+  stateEn: string;
+  stateHi: string;
+}): Promise<string | null> {
+  const nameEn = input.nameEn.trim();
+  if (!nameEn) return null;
+
+  const [existing] = await db
+    .select({ id: temples.id })
+    .from(temples)
+    .where(sql`lower(${temples.nameEn}) = lower(${nameEn})`)
+    .limit(1);
+
+  if (existing) return existing.id;
+
+  const slug = await uniqueSlug(nameEn, async (s) => {
+    const [row] = await db
+      .select({ id: temples.id })
+      .from(temples)
+      .where(eq(temples.slug, s))
+      .limit(1);
+    return Boolean(row);
+  });
+
+  const [created] = await db
+    .insert(temples)
+    .values({
+      slug,
+      nameEn,
+      nameHi: input.nameHi.trim() || nameEn,
+      cityEn: input.cityEn.trim() || "—",
+      cityHi: input.cityHi.trim() || input.cityEn.trim() || "—",
+      stateEn: input.stateEn.trim() || "India",
+      stateHi: input.stateHi.trim() || input.stateEn.trim() || "भारत",
+    })
+    .returning({ id: temples.id });
+
+  return created.id;
+}
+
+/** Category ka naam type kiya gaya hai — pehle se hai to wahi, warna nayi ban jayegi */
+async function findOrCreateCategory(
+  nameEn: string,
+  nameHi: string,
+): Promise<string | null> {
+  const clean = nameEn.trim();
+  if (!clean) return null;
+
+  const [existing] = await db
+    .select({ id: categories.id })
+    .from(categories)
+    .where(sql`lower(${categories.nameEn}) = lower(${clean})`)
+    .limit(1);
+
+  if (existing) return existing.id;
+
+  const slug = await uniqueSlug(clean, async (s) => {
+    const [row] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(eq(categories.slug, s))
+      .limit(1);
+    return Boolean(row);
+  });
+
+  const [created] = await db
+    .insert(categories)
+    .values({ slug, nameEn: clean, nameHi: nameHi.trim() || clean, order: 99 })
+    .returning({ id: categories.id });
+
+  return created.id;
+}
+
+export async function savePujaAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const session = await getAdminSession();
+  if (!session) return { error: "Login zaroori hai." };
+
+  const pujaId = String(formData.get("pujaId") ?? "");
+
+  const parsed = adminPujaSchema.safeParse({
+    slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
+    titleEn: formData.get("titleEn"),
+    titleHi: formData.get("titleHi"),
+    subtitleEn: formData.get("subtitleEn") ?? "",
+    subtitleHi: formData.get("subtitleHi") ?? "",
+    descriptionEn: formData.get("descriptionEn") ?? "",
+    descriptionHi: formData.get("descriptionHi") ?? "",
+    benefitsEn: parseLines(formData.get("benefitsEn")),
+    benefitsHi: parseLines(formData.get("benefitsHi")),
+    ritualsEn: parseLines(formData.get("ritualsEn")),
+    ritualsHi: parseLines(formData.get("ritualsHi")),
+    artKey: formData.get("artKey") ?? "om",
+    imageUrl: formData.get("imageUrl") ?? "",
+    addonIds: formData.getAll("addonIds").map((v) => String(v)),
+    pujaDate: formData.get("pujaDate"),
+    templeName: formData.get("templeName") ?? "",
+    templeNameHi: formData.get("templeNameHi") ?? "",
+    templeCity: formData.get("templeCity") ?? "",
+    templeCityHi: formData.get("templeCityHi") ?? "",
+    templeState: formData.get("templeState") ?? "",
+    templeStateHi: formData.get("templeStateHi") ?? "",
+    categoryName: formData.get("categoryName") ?? "",
+    categoryNameHi: formData.get("categoryNameHi") ?? "",
+    isFeatured: formData.get("isFeatured") === "on",
+    isActive: formData.get("isActive") === "on",
+    seatsTotal: formData.get("seatsTotal") ? Number(formData.get("seatsTotal")) : null,
+    order: Number(formData.get("order") ?? 0),
+    packages: parsePackagesFromForm(formData),
+  });
+
+  if (!parsed.success) return { error: firstError(parsed.error) };
+  const data = parsed.data;
+
+  const pujaDate = new Date(data.pujaDate);
+  if (Number.isNaN(pujaDate.getTime())) return { error: "Puja ki tareekh sahi nahi hai." };
+
+  // Mandir aur category: naam se dhoondo, na mile to naya bana do
+  const templeId = await findOrCreateTemple({
+    nameEn: data.templeName,
+    nameHi: data.templeNameHi,
+    cityEn: data.templeCity,
+    cityHi: data.templeCityHi,
+    stateEn: data.templeState,
+    stateHi: data.templeStateHi,
+  });
+  const categoryId = await findOrCreateCategory(data.categoryName, data.categoryNameHi);
+
+  const values = {
+    slug: data.slug,
+    titleEn: data.titleEn,
+    titleHi: data.titleHi,
+    subtitleEn: data.subtitleEn,
+    subtitleHi: data.subtitleHi,
+    descriptionEn: data.descriptionEn,
+    descriptionHi: data.descriptionHi,
+    benefitsEn: data.benefitsEn,
+    benefitsHi: data.benefitsHi,
+    ritualsEn: data.ritualsEn,
+    ritualsHi: data.ritualsHi,
+    artKey: data.artKey,
+    imageUrl: data.imageUrl || null,
+    pujaDate,
+    templeId,
+    categoryId,
+    isFeatured: data.isFeatured,
+    isActive: data.isActive,
+    seatsTotal: data.seatsTotal ?? null,
+    order: data.order,
+    updatedAt: new Date(),
+  };
+
+  let savedId = pujaId;
+
+  try {
+    if (pujaId) {
+      await db.update(pujas).set(values).where(eq(pujas.id, pujaId));
+    } else {
+      const [created] = await db.insert(pujas).values(values).returning({ id: pujas.id });
+      savedId = created.id;
+    }
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("pujas_slug_key") || msg.includes("duplicate key")) {
+      return { error: "Ye URL slug pehle se use ho raha hai. Koi doosra rakhein." };
+    }
+    console.error("[admin] puja save failed:", err);
+    return { error: "Save nahi ho paya. Dobara koshish karein." };
+  }
+
+  // Packages: purane hata kar naye daal do (bookings package se juda hai,
+  // isliye purane package delete nahi karte — unhe inactive kar dete hain)
+  const existing = await db
+    .select({ id: packages.id })
+    .from(packages)
+    .where(eq(packages.pujaId, savedId));
+
+  const keepIds = new Set(
+    data.packages.map((p) => p.id).filter((v): v is string => Boolean(v)),
+  );
+
+  for (const old of existing) {
+    if (!keepIds.has(old.id)) {
+      await db.update(packages).set({ isActive: false }).where(eq(packages.id, old.id));
+    }
+  }
+
+  for (const p of data.packages) {
+    const pkgValues = {
+      pujaId: savedId,
+      nameEn: p.nameEn,
+      nameHi: p.nameHi,
+      priceInPaise: p.priceInPaise,
+      mrpInPaise: p.mrpInPaise ?? null,
+      maxMembers: p.maxMembers,
+      featuresEn: p.featuresEn,
+      featuresHi: p.featuresHi,
+      isPopular: p.isPopular,
+      isActive: p.isActive,
+      order: p.order,
+    };
+    if (p.id) {
+      await db.update(packages).set(pkgValues).where(eq(packages.id, p.id));
+    } else {
+      await db.insert(packages).values(pkgValues);
+    }
+  }
+
+  // Puja ke saath kaunse add-ons dikhein — dobara set kar dete hain
+  await db.delete(pujaAddons).where(eq(pujaAddons.pujaId, savedId));
+  if (data.addonIds.length > 0) {
+    const valid = await db
+      .select({ id: addons.id })
+      .from(addons)
+      .where(inArray(addons.id, data.addonIds));
+
+    if (valid.length > 0) {
+      await db.insert(pujaAddons).values(
+        valid.map((a, i) => ({ pujaId: savedId, addonId: a.id, order: i })),
+      );
+    }
+  }
+
+  revalidatePath("/admin/pujas");
+  revalidatePath("/pujas");
+  revalidatePath(`/pujas/${data.slug}`);
+  redirect("/admin/pujas?saved=1");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Add-ons                                                            */
+/* ------------------------------------------------------------------ */
+
+export async function saveAddonAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const session = await getAdminSession();
+  if (!session) return { error: "Login zaroori hai." };
+
+  const addonId = String(formData.get("addonId") ?? "");
+
+  const parsed = adminAddonSchema.safeParse({
+    slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
+    nameEn: formData.get("nameEn"),
+    nameHi: formData.get("nameHi"),
+    descEn: formData.get("descEn") ?? "",
+    descHi: formData.get("descHi") ?? "",
+    priceInPaise: Math.round(Number(formData.get("price") ?? 0) * 100),
+    imageUrl: formData.get("imageUrl") ?? "",
+    artKey: formData.get("artKey") ?? "kalash",
+    kind: formData.get("kind") ?? "SERVICE",
+    isActive: formData.get("isActive") === "on",
+    order: Number(formData.get("order") ?? 0),
+  });
+
+  if (!parsed.success) return { error: firstError(parsed.error) };
+  const d = parsed.data;
+
+  const values = {
+    slug: d.slug,
+    nameEn: d.nameEn,
+    nameHi: d.nameHi,
+    descEn: d.descEn,
+    descHi: d.descHi,
+    priceInPaise: d.priceInPaise,
+    imageUrl: d.imageUrl || null,
+    artKey: d.artKey,
+    kind: d.kind,
+    isActive: d.isActive,
+    order: d.order,
+    updatedAt: new Date(),
+  };
+
+  try {
+    if (addonId) {
+      await db.update(addons).set(values).where(eq(addons.id, addonId));
+    } else {
+      await db.insert(addons).values(values);
+    }
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("addons_slug_key") || msg.includes("duplicate key")) {
+      return { error: "Ye slug pehle se use ho raha hai. Koi doosra rakhein." };
+    }
+    console.error("[admin] addon save failed:", err);
+    return { error: "Save nahi ho paya. Dobara koshish karein." };
+  }
+
+  revalidatePath("/admin/addons");
+  revalidatePath("/pujas");
+  redirect("/admin/addons?saved=1");
+}
+
+export async function toggleAddonActiveAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const id = String(formData.get("addonId") ?? "");
+  const next = String(formData.get("next") ?? "") === "true";
+  if (!id) return;
+
+  await db
+    .update(addons)
+    .set({ isActive: next, updatedAt: new Date() })
+    .where(eq(addons.id, id));
+
+  revalidatePath("/admin/addons");
+  revalidatePath("/pujas");
+}
+
+export async function deleteAddonAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const id = String(formData.get("addonId") ?? "");
+  if (!id) return;
+
+  try {
+    await db.delete(addons).where(eq(addons.id, id));
+  } catch {
+    await db.update(addons).set({ isActive: false }).where(eq(addons.id, id));
+  }
+
+  revalidatePath("/admin/addons");
+  revalidatePath("/pujas");
+}
+
+export async function togglePujaActiveAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const id = String(formData.get("pujaId") ?? "");
+  const next = String(formData.get("next") ?? "") === "true";
+  if (!id) return;
+
+  await db
+    .update(pujas)
+    .set({ isActive: next, updatedAt: new Date() })
+    .where(eq(pujas.id, id));
+
+  revalidatePath("/admin/pujas");
+  revalidatePath("/pujas");
+}
+
+/**
+ * Puja delete.
+ *
+ * Normal delete tabhi hoti hai jab us puja par ek bhi booking na ho —
+ * warna purani bookings ka record toot jayega. Bookings hone par saaf
+ * message dikhta hai, aur chahein to "force" se bookings samet delete
+ * kar sakte hain (admin ko dobara confirm karna padta hai).
+ */
+export async function deletePujaAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const id = String(formData.get("pujaId") ?? "");
+  const force = String(formData.get("force") ?? "") === "true";
+  if (!id) redirect("/admin/pujas");
+
+  const [row] = await db
+    .select({
+      count: sql<number>`COUNT(*)`.mapWith(Number),
+    })
+    .from(bookings)
+    .where(eq(bookings.pujaId, id));
+
+  const bookingCount = row?.count ?? 0;
+
+  if (bookingCount > 0 && !force) {
+    revalidatePath("/admin/pujas");
+    redirect(`/admin/pujas?blocked=${bookingCount}`);
+  }
+
+  if (force && bookingCount > 0) {
+    // pehle bookings (aur unke add-ons/events cascade se) hatao
+    await db.delete(bookings).where(eq(bookings.pujaId, id));
+  }
+
+  await db.delete(pujas).where(eq(pujas.id, id));
+
+  revalidatePath("/admin/pujas");
+  revalidatePath("/pujas");
+  redirect("/admin/pujas?deleted=1");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Payments — pending bookings ka milaan (reconciliation)             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ek booking ke liye Razorpay/Paytm se seedha poochho ki paisa aaya ya nahi.
+ * Paisa mila hua nikla to booking wahin confirm ho jati hai.
+ */
+export async function recheckPaymentAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const bookingId = String(formData.get("bookingId") ?? "");
+  if (!bookingId) redirect("/admin/payments");
+
+  const report = await reconcileBookingById(bookingId, { force: true }).catch(() => null);
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+  revalidatePath(`/admin/bookings/${bookingId}`);
+
+  redirect(`/admin/payments?checked=${encodeURIComponent(report?.verdict ?? "error")}`);
+}
+
+/**
+ * Haath se "paisa mil gaya" nishaan lagana.
+ *
+ * Sirf tab use karein jab gateway se milaan na ho paa raha ho par aapko
+ * pakka pata ho ki paisa aaya hai (jaise bank statement me dikh raha hai).
+ * Isse seat count badhta hai aur devotee ko WhatsApp confirmation jata hai.
+ */
+export async function forceMarkPaidAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const bookingId = String(formData.get("bookingId") ?? "");
+  if (!bookingId) redirect("/admin/payments");
+
+  await confirmBookingPaid({ bookingId });
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+  redirect("/admin/payments?marked=1");
+}
+
+/**
+ * Purani adhuri bookings list se hata do.
+ * Sirf wahi hatti hain jinke baare me gateway saaf keh de ki payment hui hi nahi.
+ */
+export async function cleanupAbandonedAction() {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const removed = await cleanupAbandoned(6).catch(() => 0);
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+  redirect(`/admin/payments?cleaned=${removed}`);
+}
+
+/**
+ * Razorpay ki payment ID se booking dhoondh kar confirm karna.
+ *
+ * Ye sabse pakka rasta hai — admin Razorpay dashboard se payment ID
+ * (pay_XXXX) copy karke yahan paste kar deta hai. Status aur raashi
+ * Razorpay se hi poochhi jati hai, admin ke bharose kuch nahi hota.
+ */
+export async function attachPaymentAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const paymentId = String(formData.get("paymentId") ?? "");
+  const result = await attachPayment(paymentId).catch((err) => ({
+    ok: false,
+    message: `Kuch galat ho gaya: ${err instanceof Error ? err.message : String(err)}`,
+  }));
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+
+  redirect(
+    `/admin/payments?ok=${result.ok ? "1" : "0"}&msg=${encodeURIComponent(result.message)}`,
+  );
+}
+
+/** Razorpay par jitni bhi "paisa aaya par booking pending" payments hain, sab confirm karo */
+export async function confirmAllFromGatewayAction() {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const { confirmed, error } = await confirmAllPaidFromGateway(25).catch((err) => ({
+    confirmed: 0,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+
+  const msg = error
+    ? `Nahi ho paya: ${error}`
+    : confirmed > 0
+      ? `✓ ${confirmed} booking confirm kar di gayi.`
+      : "Razorpay par aisi koi payment nahi mili jiski booking pending ho.";
+
+  redirect(`/admin/payments?ok=${error ? "0" : "1"}&msg=${encodeURIComponent(msg)}`);
+}
+</file>
+
 <file path="README.md">
 # 🪔 Pooja Path
 
@@ -15754,6 +17734,7 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Admin bypass | Auth **har page aur har action me** server-side check hota hai — middleware par bharosa nahi (wo bypass ho sakta hai) |
 | Payment tampering | Amount hamesha database se, kabhi browser se nahi; Razorpay HMAC signature verify + server-to-server payment fetch se confirm |
 | Redirect toot-na | Payment ke baad Razorpay seedha server par callback karta hai (`/api/payment/razorpay/callback`) — mobile/UPI par bhi redirect pakka |
+| Paisa kata par booking pending | **Reconcile** — pending booking khulte hi server khud gateway se poochhta hai ki paisa aaya ya nahi, aur haan hone par booking apne aap confirm ho jati hai. Callback aur webhook dono fail ho jayein tab bhi paisa kabhi "gum" nahi hota |
 | Fake webhook | `x-razorpay-signature` HMAC verify (Paytm ke liye CHECKSUMHASH) — bina sahi signature ke reject |
 | Spam bookings/messages | IP rate limiting + contact form me honeypot |
 | Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block; list me sirf puja/tithi/status — naam, gotra, pata nahi |
@@ -15891,6 +17872,101 @@ RAZORPAY_WEBHOOK_SECRET = webhook wala secret
 - Booking dobara confirm nahi hoti (webhook aur browser dono aayein tab bhi ek hi baar)
 - Key Secret sirf server par rehta hai, browser tak kabhi nahi jaata
 
+### 🔴 "Payment ho gaya par booking pending dikh rahi hai"
+
+Ye sabse zaroori hissa hai — ek baar dhyaan se padh lein.
+
+Booking confirm hone ke **teen** raaste hain. Pehle do toot sakte hain, teesra hamesha chalta hai:
+
+| # | Raasta | Kab toot jata hai |
+|---|---|---|
+| 1 | **Browser callback** — payment ke baad Razorpay user ko `/api/payment/razorpay/callback` par bhejta hai | Mobile par UPI app (GPay/PhonePe) khulne ke baad log wapas browser me nahi aate. Tab callback chalta hi nahi. Naye Razorpay account me domain whitelist na ho to bhi nahi chalta. |
+| 2 | **Webhook** — Razorpay khud humare server ko batata hai | Dashboard me webhook register na kiya ho, ya `RAZORPAY_WEBHOOK_SECRET` match na kare |
+| 3 | **Reconcile** — hum khud Razorpay se poochhte hain | Kabhi nahi — jab bhi koi pending booking khulti hai, ye apne aap chalta hai |
+
+**Raasta 3 (reconcile) apne aap in teen jagah chalta hai:**
+
+- Booking page (`/booking/PP-...`) khulte hi — aur page chup-chaap refresh hota rehta hai, jaise hi paisa mila booking confirm dikhne lagti hai
+- Track page par number daalte hi — us number ki saari pending bookings check ho jati hain
+- **Admin → Payments** — saari pending bookings ek saath, aur har ek ke saamne likha hota hai ki Razorpay kya keh raha hai
+
+Isliye agar kabhi "payment ho gaya par pending dikh raha hai" jaisa lage, to **Admin → Payments** khol lein. Jinka paisa aa chuka hoga wo wahin confirm ho jayengi.
+
+#### Sabse pakka rasta — Razorpay ki taraf se milaan
+
+Admin → Payments page par upar hi ek hissa hai: **"Razorpay par aayi payments"**.
+Ye humari bookings se shuru nahi karta, seedha Razorpay se poochhta hai
+*"tumhare paas kya-kya aaya hai?"* — aur phir har payment ko uski booking se
+jodta hai. Booking dhoondne ke teen raaste hain, ek fail ho to doosra:
+
+1. booking par save ki hui order id
+2. order ka `receipt` (usme humne bookingCode hi bhara tha)
+3. order ke `notes.bookingCode`
+
+Isliye agar kisi booking par order id save hi na hui ho, tab bhi paisa apni
+booking tak pahunch jata hai. Jis payment ka paisa aa chuka hai par booking
+pending hai, uske saamne **"Jodein aur confirm karein"** button aa jata hai —
+ya upar se ek baar me sabko confirm kar dein.
+
+Agar kabhi list me koi payment na dikhe, to Razorpay Dashboard → Payments se
+**Payment ID (pay_XXXX)** copy karke neeche wale box me paste kar dein. Hum
+Razorpay se status aur raashi khud poochh kar booking confirm kar denge.
+
+#### Admin → Payments page kya batata hai
+
+| Nishaan | Matlab | Kya karna hai |
+|---|---|---|
+| ✓ Abhi confirm hui | Paisa pehle hi aa chuka tha, humne confirm kar diya | Kuch nahi |
+| ◦ Payment hui hi nahi | User ne window band kar di, paisa nahi kata | Kuch nahi |
+| ⏳ Bank ka jawab baaki | UPI/netbanking me 2-10 min lag sakte hain | Thodi der baad dobara dekhein |
+| ✕ Payment fail hui | Bank ne mana kiya, paisa nahi kata | Kuch nahi |
+| ⚠️ Raashi alag hai | Paisa aaya par amount match nahi | Khud dekhein, phir "Haath se paid mark karein" |
+| ⚠️ Gateway se baat nahi hui | Keys galat hain ya Razorpay down hai | Setup wala hissa upar dekhein |
+
+Ek **"Haath se paid mark karein"** button bhi hai — sirf tab use karein jab aapko bank statement se pakka pata ho ki paisa aaya hai.
+
+#### Webhook zaroor lagayein (suraksha-jaal)
+
+Reconcile hone ke baad bhi webhook lagana chahiye — isse booking **turant** confirm hoti hai, kisi ke page kholne ka intezaar nahi karna padta.
+
+Razorpay Dashboard → **Settings → Webhooks → Add New Webhook**
+
+```
+URL     : https://aapka-domain.com/api/payment/webhook      ← poora path zaroori hai
+Secret  : koi bhi random string                              ← khaali mat chhodein
+Events  : payment.captured, payment.failed, order.paid
+```
+
+⚠️ **Sabse aam galti:** URL me sirf domain (`https://aapka-domain.com`) ya
+`/admin` daal dena. Aisa karne par webhook kabhi nahi chalega — poora
+`/api/payment/webhook` likhna zaroori hai.
+
+Sahi URL hai ya nahi, ye browser me kholkar jaanch sakte hain — sahi hoga to
+ek chhota sa JSON message dikhega ("Yehi sahi webhook URL hai…"), 404 nahi.
+
+**Secret khaali mat chhodein** — bina secret ke Razorpay signature nahi bhejta
+aur humara server surakshit rehne ke liye aisi request reject kar deta hai.
+
+Admin → Payments page par **"Webhook aaya ya nahi"** likha rehta hai — wahin se
+pata chal jayega ki webhook sach me pahunch raha hai ya nahi.
+
+Wahi secret Render → Environment me `RAZORPAY_WEBHOOK_SECRET` me bhi daalein aur redeploy karein.
+Admin → Payments page upar hi bata dega ki secret set hua ya nahi.
+
+#### Callback ke liye domain whitelist
+
+Naye Razorpay account me `callback_url` tabhi chalta hai jab uska domain aapke account me
+registered ho. Razorpay Dashboard → **Account & Settings → Website and app details** me
+apna domain (`https://anusthanpooja.site`) zaroor daal dein.
+
+#### Test key par UPI kaam nahi karta
+
+`rzp_test_` key par mobile me UPI app nahi khulta — **"Can't open payment app"** dikhta hai.
+Ye normal hai. Asli bookings ke liye `rzp_live_` key hi chahiye. Admin → Payments page
+upar hi bata deta hai ki abhi TEST mode hai ya LIVE.
+
+---
+
 ### Paytm par switch karna ho to
 
 `.env` me itna hi:
@@ -16008,6 +18084,7 @@ Jab tak key nahi hai, message server log me print hote hain (`[whatsapp:demo] ..
 | Booking dekhna | Admin → Bookings (search: ID, naam, phone) |
 | Video bhejna | Booking kholein → status **Video shared** + link daalein → Update |
 | Prasad tracking | Status **Prasad dispatched** + tracking number → Update |
+| Payment pending sudhaarna | Admin → **Payments** — page kholte hi gateway se milaan ho jata hai |
 | Contact messages | Admin → Messages |
 | Password badalna | Admin → Settings |
 
@@ -16025,6 +18102,7 @@ npm run db:migrate   # naye database tables banayein/update karein
 npm run db:seed      # demo content (pehli baar hi chalta hai)
 npm run db:generate  # schema badalne par naya SQL migration banayein
 npm run lint         # code check
+npm run test:reconcile  # payment milaan ke sabhi cases test karein (nakli gateway se)
 npm audit            # security check
 ```
 
