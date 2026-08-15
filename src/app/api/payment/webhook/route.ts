@@ -4,9 +4,25 @@ import { db } from "@/db";
 import { bookings } from "@/db/schema";
 import { verifyWebhookSignature } from "@/lib/payments/razorpay";
 import { confirmBookingPaid, markBookingFailed } from "@/lib/booking-service";
+import { recordWebhook } from "@/lib/payments/webhook-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * Browser me ye URL kholne par saaf-saaf pata chal jata hai ki
+ * Razorpay dashboard me sahi jagah daali gayi hai ya nahi.
+ * Koi secret ya niji jaankari yahan nahi jaati.
+ */
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    endpoint: "razorpay-webhook",
+    message:
+      "Yehi sahi webhook URL hai. Ise Razorpay Dashboard → Settings → Webhooks me daalein.",
+    expects: "POST with x-razorpay-signature",
+  });
+}
 
 /**
  * Razorpay webhook.
@@ -25,6 +41,13 @@ export async function POST(req: Request) {
 
   if (!verifyWebhookSignature(raw, signature)) {
     console.warn("[webhook] invalid signature");
+    recordWebhook({
+      event: "?",
+      ok: false,
+      detail: signature
+        ? "Signature match nahi hui — Razorpay wala secret aur RAZORPAY_WEBHOOK_SECRET ek jaisa nahi hai."
+        : "Signature aayi hi nahi — Razorpay ke webhook me Secret khaali chhoda gaya hai.",
+    });
     return NextResponse.json({ ok: false }, { status: 401 });
   }
 
@@ -44,8 +67,12 @@ export async function POST(req: Request) {
 
   const payment = event.payload?.payment?.entity;
   const orderId = payment?.order_id ?? event.payload?.order?.entity?.id;
+  const eventName = event.event ?? "?";
 
-  if (!orderId) return NextResponse.json({ ok: true, ignored: true });
+  if (!orderId) {
+    recordWebhook({ event: eventName, ok: true, detail: "Is event me order id nahi thi." });
+    return NextResponse.json({ ok: true, ignored: true });
+  }
 
   const [booking] = await db
     .select()
@@ -53,7 +80,16 @@ export async function POST(req: Request) {
     .where(eq(bookings.providerOrderId, orderId))
     .limit(1);
 
-  if (!booking) return NextResponse.json({ ok: true, ignored: true });
+  if (!booking) {
+    recordWebhook({
+      event: eventName,
+      ok: true,
+      detail: `Order ${orderId} ki koi booking nahi mili.`,
+    });
+    return NextResponse.json({ ok: true, ignored: true });
+  }
+
+  recordWebhook({ event: eventName, ok: true, detail: `Booking ${booking.bookingCode}` });
 
   switch (event.event) {
     case "payment.captured":

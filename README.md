@@ -266,10 +266,23 @@ Reconcile hone ke baad bhi webhook lagana chahiye — isse booking **turant** co
 Razorpay Dashboard → **Settings → Webhooks → Add New Webhook**
 
 ```
-URL     : https://aapka-domain.com/api/payment/webhook
-Secret  : koi bhi random string
+URL     : https://aapka-domain.com/api/payment/webhook      ← poora path zaroori hai
+Secret  : koi bhi random string                              ← khaali mat chhodein
 Events  : payment.captured, payment.failed, order.paid
 ```
+
+⚠️ **Sabse aam galti:** URL me sirf domain (`https://aapka-domain.com`) ya
+`/admin` daal dena. Aisa karne par webhook kabhi nahi chalega — poora
+`/api/payment/webhook` likhna zaroori hai.
+
+Sahi URL hai ya nahi, ye browser me kholkar jaanch sakte hain — sahi hoga to
+ek chhota sa JSON message dikhega ("Yehi sahi webhook URL hai…"), 404 nahi.
+
+**Secret khaali mat chhodein** — bina secret ke Razorpay signature nahi bhejta
+aur humara server surakshit rehne ke liye aisi request reject kar deta hai.
+
+Admin → Payments page par **"Webhook aaya ya nahi"** likha rehta hai — wahin se
+pata chal jayega ki webhook sach me pahunch raha hai ya nahi.
 
 Wahi secret Render → Environment me `RAZORPAY_WEBHOOK_SECRET` me bhi daalein aur redeploy karein.
 Admin → Payments page upar hi bata dega ki secret set hua ya nahi.

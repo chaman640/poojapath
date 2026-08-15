@@ -8,6 +8,7 @@ import {
   reviewGatewayPayments,
   type ReconcileVerdict,
 } from "@/lib/payments/reconcile";
+import { webhookStatus } from "@/lib/payments/webhook-log";
 import { siteConfig } from "@/lib/env";
 import { formatDate, formatINR } from "@/lib/utils";
 import ConfirmSubmit from "@/components/admin/ConfirmSubmit";
@@ -111,6 +112,7 @@ export default async function AdminPaymentsPage({
 
   /* ---- Setup health ---- */
   const keyMode = provider === "razorpay" ? razorpay.keyMode() : "unknown";
+  const wh = webhookStatus();
   const health: Array<[string, string, boolean, string?]> = [
     [
       "Payment gateway",
@@ -139,8 +141,25 @@ export default async function AdminPaymentsPage({
           ],
         ] as Array<[string, string, boolean, string?]>)
       : []),
+    [
+      "Webhook URL (yahi daalein)",
+      `${base}/api/payment/webhook`,
+      true,
+      "Razorpay Dashboard → Developers → Webhooks me BILKUL yahi URL hona chahiye. Sirf domain ya /admin daalne se webhook kabhi nahi chalega. Ise browser me kholkar dekh sakte hain — sahi hoga to ek chhota sa JSON message dikhega.",
+    ],
+    [
+      "Webhook aaya ya nahi",
+      wh.total === 0
+        ? "Is server ke chalu hone ke baad ek bhi webhook nahi aaya"
+        : `${wh.total} webhook aaye${wh.rejected ? ` (${wh.rejected} reject hue)` : ""} — aakhri: ${wh.last?.event} • ${wh.last?.detail}`,
+      wh.total > 0 && wh.rejected === 0,
+      wh.total === 0
+        ? "Iska matlab ya to abhi koi payment nahi hui, ya Razorpay me URL galat hai. Upar wala URL daal kar ek test payment karein."
+        : wh.rejected > 0
+          ? wh.last?.detail
+          : undefined,
+    ],
     ["Callback URL", `${base}/api/payment/razorpay/callback`, true],
-    ["Webhook URL", `${base}/api/payment/webhook`, true],
   ];
 
   return (
