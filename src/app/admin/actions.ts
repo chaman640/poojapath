@@ -31,7 +31,8 @@ import {
   firstError,
   loginSchema,
 } from "@/lib/validation";
-import { changeBookingStatus } from "@/lib/booking-service";
+import { changeBookingStatus, confirmBookingPaid } from "@/lib/booking-service";
+import { cleanupAbandoned, reconcileBookingById } from "@/lib/payments/reconcile";
 import { slugify } from "@/lib/utils";
 
 export type ActionState = { error?: string; success?: string };
@@ -612,4 +613,64 @@ export async function deletePujaAction(formData: FormData) {
   revalidatePath("/admin/pujas");
   revalidatePath("/pujas");
   redirect("/admin/pujas?deleted=1");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Payments — pending bookings ka milaan (reconciliation)             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ek booking ke liye Razorpay/Paytm se seedha poochho ki paisa aaya ya nahi.
+ * Paisa mila hua nikla to booking wahin confirm ho jati hai.
+ */
+export async function recheckPaymentAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const bookingId = String(formData.get("bookingId") ?? "");
+  if (!bookingId) redirect("/admin/payments");
+
+  const report = await reconcileBookingById(bookingId, { force: true }).catch(() => null);
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+  revalidatePath(`/admin/bookings/${bookingId}`);
+
+  redirect(`/admin/payments?checked=${encodeURIComponent(report?.verdict ?? "error")}`);
+}
+
+/**
+ * Haath se "paisa mil gaya" nishaan lagana.
+ *
+ * Sirf tab use karein jab gateway se milaan na ho paa raha ho par aapko
+ * pakka pata ho ki paisa aaya hai (jaise bank statement me dikh raha hai).
+ * Isse seat count badhta hai aur devotee ko WhatsApp confirmation jata hai.
+ */
+export async function forceMarkPaidAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const bookingId = String(formData.get("bookingId") ?? "");
+  if (!bookingId) redirect("/admin/payments");
+
+  await confirmBookingPaid({ bookingId });
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+  redirect("/admin/payments?marked=1");
+}
+
+/**
+ * Purani adhuri bookings list se hata do.
+ * Sirf wahi hatti hain jinke baare me gateway saaf keh de ki payment hui hi nahi.
+ */
+export async function cleanupAbandonedAction() {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const removed = await cleanupAbandoned(6).catch(() => 0);
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+  redirect(`/admin/payments?cleaned=${removed}`);
 }

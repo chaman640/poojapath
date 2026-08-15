@@ -83,6 +83,70 @@ export async function fetchPayment(paymentId: string) {
   return getClient().payments.fetch(paymentId);
 }
 
+export type OrderPayment = {
+  id: string;
+  status: string; // created | authorized | captured | refunded | failed
+  amount: number;
+  method?: string | null;
+  errorDescription?: string | null;
+  createdAt: number | null;
+};
+
+/**
+ * Ek order par ab tak jitni bhi payment koshishein hui hain, sab.
+ *
+ * Ye reconcile ke liye sabse bharosemand tareeka hai: booking ke paas
+ * sirf order id hoti hai (payment id tabhi milti hai jab browser wapas
+ * aata hai). Browser wapas na aaye — user ne UPI app me paisa de diya aur
+ * tab band kar di — to bhi order se payment dhoondh kar booking confirm
+ * ho jati hai.
+ */
+export async function fetchOrderPayments(orderId: string): Promise<OrderPayment[]> {
+  const res = (await getClient().orders.fetchPayments(orderId)) as unknown as {
+    items?: Array<{
+      id: string;
+      status: string;
+      amount: number | string;
+      method?: string;
+      error_description?: string | null;
+      created_at?: number;
+    }>;
+  };
+
+  return (res?.items ?? []).map((p) => ({
+    id: p.id,
+    status: String(p.status),
+    amount: Number(p.amount),
+    method: p.method ?? null,
+    errorDescription: p.error_description ?? null,
+    createdAt: p.created_at ?? null,
+  }));
+}
+
+/** Order khud kya kehta hai — `paid` hone par amount_paid pura ho jata hai */
+export async function fetchOrder(orderId: string) {
+  return getClient().orders.fetch(orderId);
+}
+
+/** Sirf dikhane ke liye — poori key kabhi log/screen par nahi jani chahiye */
+export function maskedKeyId(): string {
+  const k = process.env.RAZORPAY_KEY_ID?.trim();
+  if (!k) return "";
+  return k.length <= 10 ? k : `${k.slice(0, 8)}…${k.slice(-4)}`;
+}
+
+/** Test key ya live key? Galti pakadne me bahut kaam aata hai */
+export function keyMode(): "test" | "live" | "unknown" {
+  const k = process.env.RAZORPAY_KEY_ID?.trim() ?? "";
+  if (k.startsWith("rzp_test")) return "test";
+  if (k.startsWith("rzp_live")) return "live";
+  return "unknown";
+}
+
+export function hasWebhookSecret(): boolean {
+  return Boolean(process.env.RAZORPAY_WEBHOOK_SECRET?.trim());
+}
+
 function safeCompareHex(a: string, b: string): boolean {
   try {
     const ab = Buffer.from(a, "hex");

@@ -68,6 +68,7 @@ Online puja booking website — Bhaktimay jaisa, lekin poora apna code, apna des
 | Admin bypass | Auth **har page aur har action me** server-side check hota hai — middleware par bharosa nahi (wo bypass ho sakta hai) |
 | Payment tampering | Amount hamesha database se, kabhi browser se nahi; Razorpay HMAC signature verify + server-to-server payment fetch se confirm |
 | Redirect toot-na | Payment ke baad Razorpay seedha server par callback karta hai (`/api/payment/razorpay/callback`) — mobile/UPI par bhi redirect pakka |
+| Paisa kata par booking pending | **Reconcile** — pending booking khulte hi server khud gateway se poochhta hai ki paisa aaya ya nahi, aur haan hone par booking apne aap confirm ho jati hai. Callback aur webhook dono fail ho jayein tab bhi paisa kabhi "gum" nahi hota |
 | Fake webhook | `x-razorpay-signature` HMAC verify (Paytm ke liye CHECKSUMHASH) — bina sahi signature ke reject |
 | Spam bookings/messages | IP rate limiting + contact form me honeypot |
 | Booking ID guessing | Track page par 10 min me 8 koshish, phir 20 min block; list me sirf puja/tithi/status — naam, gotra, pata nahi |
@@ -205,6 +206,68 @@ RAZORPAY_WEBHOOK_SECRET = webhook wala secret
 - Booking dobara confirm nahi hoti (webhook aur browser dono aayein tab bhi ek hi baar)
 - Key Secret sirf server par rehta hai, browser tak kabhi nahi jaata
 
+### 🔴 "Payment ho gaya par booking pending dikh rahi hai"
+
+Ye sabse zaroori hissa hai — ek baar dhyaan se padh lein.
+
+Booking confirm hone ke **teen** raaste hain. Pehle do toot sakte hain, teesra hamesha chalta hai:
+
+| # | Raasta | Kab toot jata hai |
+|---|---|---|
+| 1 | **Browser callback** — payment ke baad Razorpay user ko `/api/payment/razorpay/callback` par bhejta hai | Mobile par UPI app (GPay/PhonePe) khulne ke baad log wapas browser me nahi aate. Tab callback chalta hi nahi. Naye Razorpay account me domain whitelist na ho to bhi nahi chalta. |
+| 2 | **Webhook** — Razorpay khud humare server ko batata hai | Dashboard me webhook register na kiya ho, ya `RAZORPAY_WEBHOOK_SECRET` match na kare |
+| 3 | **Reconcile** — hum khud Razorpay se poochhte hain | Kabhi nahi — jab bhi koi pending booking khulti hai, ye apne aap chalta hai |
+
+**Raasta 3 (reconcile) apne aap in teen jagah chalta hai:**
+
+- Booking page (`/booking/PP-...`) khulte hi — aur page chup-chaap refresh hota rehta hai, jaise hi paisa mila booking confirm dikhne lagti hai
+- Track page par number daalte hi — us number ki saari pending bookings check ho jati hain
+- **Admin → Payments** — saari pending bookings ek saath, aur har ek ke saamne likha hota hai ki Razorpay kya keh raha hai
+
+Isliye agar kabhi "payment ho gaya par pending dikh raha hai" jaisa lage, to **Admin → Payments** khol lein. Jinka paisa aa chuka hoga wo wahin confirm ho jayengi.
+
+#### Admin → Payments page kya batata hai
+
+| Nishaan | Matlab | Kya karna hai |
+|---|---|---|
+| ✓ Abhi confirm hui | Paisa pehle hi aa chuka tha, humne confirm kar diya | Kuch nahi |
+| ◦ Payment hui hi nahi | User ne window band kar di, paisa nahi kata | Kuch nahi |
+| ⏳ Bank ka jawab baaki | UPI/netbanking me 2-10 min lag sakte hain | Thodi der baad dobara dekhein |
+| ✕ Payment fail hui | Bank ne mana kiya, paisa nahi kata | Kuch nahi |
+| ⚠️ Raashi alag hai | Paisa aaya par amount match nahi | Khud dekhein, phir "Haath se paid mark karein" |
+| ⚠️ Gateway se baat nahi hui | Keys galat hain ya Razorpay down hai | Setup wala hissa upar dekhein |
+
+Ek **"Haath se paid mark karein"** button bhi hai — sirf tab use karein jab aapko bank statement se pakka pata ho ki paisa aaya hai.
+
+#### Webhook zaroor lagayein (suraksha-jaal)
+
+Reconcile hone ke baad bhi webhook lagana chahiye — isse booking **turant** confirm hoti hai, kisi ke page kholne ka intezaar nahi karna padta.
+
+Razorpay Dashboard → **Settings → Webhooks → Add New Webhook**
+
+```
+URL     : https://aapka-domain.com/api/payment/webhook
+Secret  : koi bhi random string
+Events  : payment.captured, payment.failed, order.paid
+```
+
+Wahi secret Render → Environment me `RAZORPAY_WEBHOOK_SECRET` me bhi daalein aur redeploy karein.
+Admin → Payments page upar hi bata dega ki secret set hua ya nahi.
+
+#### Callback ke liye domain whitelist
+
+Naye Razorpay account me `callback_url` tabhi chalta hai jab uska domain aapke account me
+registered ho. Razorpay Dashboard → **Account & Settings → Website and app details** me
+apna domain (`https://anusthanpooja.site`) zaroor daal dein.
+
+#### Test key par UPI kaam nahi karta
+
+`rzp_test_` key par mobile me UPI app nahi khulta — **"Can't open payment app"** dikhta hai.
+Ye normal hai. Asli bookings ke liye `rzp_live_` key hi chahiye. Admin → Payments page
+upar hi bata deta hai ki abhi TEST mode hai ya LIVE.
+
+---
+
 ### Paytm par switch karna ho to
 
 `.env` me itna hi:
@@ -322,6 +385,7 @@ Jab tak key nahi hai, message server log me print hote hain (`[whatsapp:demo] ..
 | Booking dekhna | Admin → Bookings (search: ID, naam, phone) |
 | Video bhejna | Booking kholein → status **Video shared** + link daalein → Update |
 | Prasad tracking | Status **Prasad dispatched** + tracking number → Update |
+| Payment pending sudhaarna | Admin → **Payments** — page kholte hi gateway se milaan ho jata hai |
 | Contact messages | Admin → Messages |
 | Password badalna | Admin → Settings |
 
@@ -339,6 +403,7 @@ npm run db:migrate   # naye database tables banayein/update karein
 npm run db:seed      # demo content (pehli baar hi chalta hai)
 npm run db:generate  # schema badalne par naya SQL migration banayein
 npm run lint         # code check
+npm run test:reconcile  # payment milaan ke sabhi cases test karein (nakli gateway se)
 npm audit            # security check
 ```
 

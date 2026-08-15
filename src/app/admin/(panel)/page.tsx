@@ -65,6 +65,22 @@ export default async function AdminDashboard() {
         <p className="mt-1 text-[14px] text-ink/55">Aaj ki sthiti ek nazar mein</p>
       </div>
 
+      {/* Pending bookings — inme se kuch ka paisa aa chuka ho sakta hai */}
+      {stats.pending > 0 && (
+        <Link
+          href="/admin/payments"
+          className="block rounded-2xl border border-amber-300 bg-amber-50 p-4 transition hover:bg-amber-100"
+        >
+          <p className="text-[13.5px] font-bold text-amber-900">
+            ⏳ {stats.pending} booking “Payment pending” me hai — Payments page kholein
+          </p>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-amber-800">
+            Page kholte hi hum har booking ke liye seedha gateway se poochh lenge ki paisa
+            aaya ya nahi. Jinka paisa aa chuka hai wo wahin confirm ho jayengi. →
+          </p>
+        </Link>
+      )}
+
       {/* Setup warnings */}
       <div className="grid gap-3 sm:grid-cols-2">
         {payProvider === "none" && (

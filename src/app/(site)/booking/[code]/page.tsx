@@ -6,6 +6,8 @@ import { db } from "@/db";
 import { bookingEvents } from "@/db/schema";
 import PujaImage from "@/components/PujaImage";
 import BookingTimeline from "@/components/BookingTimeline";
+import PendingPaymentWatcher from "@/components/PendingPaymentWatcher";
+import { reconcileByBookingCode } from "@/lib/payments/reconcile";
 import { getLangDict } from "@/lib/lang-server";
 import { pick } from "@/lib/i18n";
 import { formatDate, formatINR, maskPhone } from "@/lib/utils";
@@ -31,7 +33,18 @@ export default async function BookingStatusPage({
   const sp = await searchParams;
   const { lang, t } = await getLangDict();
 
-  const data = await getBookingByCode(decodeURIComponent(code));
+  const plainCode = decodeURIComponent(code);
+
+  /**
+   * Page khulte hi gateway se poochh lo ki paisa aaya ya nahi.
+   *
+   * Callback ya webhook chuk bhi jaye to booking yahin apne aap confirm
+   * ho jati hai — user ko "payment pending" dekh kar ghabrana nahi padta.
+   * Gateway se baat na ho paye to chup-chaap aage badh jate hain.
+   */
+  await reconcileByBookingCode(plainCode).catch(() => null);
+
+  const data = await getBookingByCode(plainCode);
   if (!data) notFound();
 
   const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
@@ -167,6 +180,10 @@ export default async function BookingStatusPage({
           </div>
         )}
       </div>
+
+      {/* Pending ho to page chup-chaap refresh hota rahega — jaise hi
+          Razorpay "paisa mil gaya" kahega, booking apne aap confirm dikhegi */}
+      {!isConfirmed && <PendingPaymentWatcher />}
 
       {/* -------- Payment ke baad ke messages -------- */}
       {paymentPending && (

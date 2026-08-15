@@ -6,6 +6,7 @@ import { trackSchema } from "@/lib/validation";
 import { guardPublicPost, jsonError } from "@/lib/guard";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { normalizePhone } from "@/lib/utils";
+import { reconcilePendingForPhone } from "@/lib/payments/reconcile";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,6 +60,15 @@ export async function POST(req: Request) {
     if (!row) return jsonError("not_found", 404);
     return NextResponse.json({ ok: true, bookingCode: row.code });
   }
+
+  /**
+   * List dikhane se pehle gateway se poochh lo.
+   *
+   * Agar user ne paisa de diya tha par browser wapas nahi aaya (mobile par
+   * UPI app se aksar hota hai), to yahin booking confirm ho jayegi aur
+   * neeche list me sahi status dikhega — "Payment pending" nahi.
+   */
+  await reconcilePendingForPhone(phone).catch(() => null);
 
   /* ---- Sirf number: uski saari bookings ki list ---- */
   const rows = await db
