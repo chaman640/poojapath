@@ -351,6 +351,236 @@ export async function reconcileAllPending(limit = 25): Promise<ReconcileReport[]
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Ulta milaan — Razorpay ki taraf se                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Booking dhoondne ke teen raaste (ek fail ho to doosra).
+ *
+ *  1. providerOrderId se — sidha rasta
+ *  2. order ke `receipt` se — humne receipt me bookingCode hi bhara tha
+ *  3. order ke `notes.bookingCode` se
+ *
+ * Teen raaste isliye ki agar kisi booking par order id save hone se pehle
+ * hi kuch gadbad ho gayi ho, to bhi paisa apni booking tak pahunch jaye.
+ */
+async function findBookingForPayment(orderId: string | null, hint: string | null) {
+  if (orderId) {
+    const [byOrder] = await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.providerOrderId, orderId))
+      .limit(1);
+    if (byOrder) return byOrder;
+  }
+
+  const codes: string[] = [];
+  if (hint) codes.push(hint.trim().toUpperCase());
+
+  if (orderId && razorpay.isRazorpayLive()) {
+    try {
+      const order = (await razorpay.fetchOrder(orderId)) as unknown as {
+        receipt?: string | null;
+        notes?: Record<string, string> | null;
+      };
+      if (order?.receipt) codes.push(String(order.receipt).trim().toUpperCase());
+      if (order?.notes?.bookingCode) {
+        codes.push(String(order.notes.bookingCode).trim().toUpperCase());
+      }
+    } catch {
+      /* order na mile to bhi aage badho */
+    }
+  }
+
+  for (const code of Array.from(new Set(codes)).filter(Boolean)) {
+    const [byCode] = await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.bookingCode, code))
+      .limit(1);
+    if (byCode) return byCode;
+  }
+
+  return null;
+}
+
+export type GatewayPaymentRow = razorpay.RecentPayment & {
+  bookingId: string | null;
+  bookingCode: string | null;
+  bookingStatus: string | null;
+  /** Kya is payment ke liye humein kuch karna chahiye? */
+  actionable: boolean;
+  note: string;
+};
+
+/**
+ * Razorpay par aayi pichhli payments uthao aur har ek ko apni booking se jodo.
+ *
+ * Ye "ulta" milaan hai — pending bookings se shuru karne ke bajaye seedha
+ * gateway se shuru hota hai. Isse wo payment bhi pakdi jati hai jiski booking
+ * par order id kisi wajah se save hi nahi hui thi.
+ */
+export async function reviewGatewayPayments(
+  count = 25,
+): Promise<{ ok: true; rows: GatewayPaymentRow[] } | { ok: false; error: string }> {
+  if (!razorpay.isRazorpayLive()) {
+    return { ok: false, error: "Razorpay keys server par set nahi hain." };
+  }
+
+  let payments: razorpay.RecentPayment[];
+  try {
+    payments = await razorpay.fetchRecentPayments(count);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
+    console.error("[reconcile] payments.all failed:", err);
+    return { ok: false, error: `Razorpay se payments list nahi mili: ${msg}` };
+  }
+
+  const rows: GatewayPaymentRow[] = [];
+
+  for (const p of payments) {
+    const booking = await findBookingForPayment(p.orderId, p.bookingCodeHint).catch(
+      () => null,
+    );
+
+    const paid = p.status === "captured" || p.status === "authorized";
+
+    let note: string;
+    let actionable = false;
+
+    if (!booking) {
+      note = paid
+        ? "⚠️ Is payment ki booking humare database me nahi mili. Order ID neeche diya hai — Bookings me dhoondh kar dekhein."
+        : "Is payment ki koi booking nahi mili (payment safal bhi nahi thi).";
+    } else if (booking.status !== "PENDING_PAYMENT") {
+      note = "✓ Booking pehle se confirm hai.";
+    } else if (!paid) {
+      note = `Payment ${p.status} thi — booking pending rehna sahi hai.`;
+    } else if (p.amount !== booking.amountInPaise) {
+      note = `⚠️ Raashi alag hai — payment ₹${(p.amount / 100).toFixed(2)}, booking ₹${(
+        booking.amountInPaise / 100
+      ).toFixed(2)}.`;
+    } else {
+      note = "💰 Paisa aa chuka hai par booking pending hai — “Jodein aur confirm karein” dabayein.";
+      actionable = true;
+    }
+
+    rows.push({
+      ...p,
+      bookingId: booking?.id ?? null,
+      bookingCode: booking?.bookingCode ?? null,
+      bookingStatus: booking?.status ?? null,
+      actionable,
+      note,
+    });
+  }
+
+  return { ok: true, rows };
+}
+
+/**
+ * Ek payment ID ko uski booking se jod kar confirm karna.
+ *
+ * Amount aur status Razorpay se hi liye jate hain — browser ya admin ke
+ * bataye hue kisi bhi aankde par bharosa nahi.
+ */
+export async function attachPayment(
+  paymentIdRaw: string,
+): Promise<{ ok: boolean; message: string; bookingCode?: string }> {
+  const paymentId = paymentIdRaw.trim();
+  if (!/^pay_[A-Za-z0-9]+$/.test(paymentId)) {
+    return { ok: false, message: "Payment ID aisi honi chahiye: pay_XXXXXXXXXXXX" };
+  }
+  if (!razorpay.isRazorpayLive()) {
+    return { ok: false, message: "Razorpay keys server par set nahi hain." };
+  }
+
+  let payment: {
+    status?: string;
+    amount?: number | string;
+    order_id?: string | null;
+    notes?: Record<string, string> | null;
+  };
+  try {
+    payment = (await razorpay.fetchPayment(paymentId)) as never;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : JSON.stringify(err);
+    return { ok: false, message: `Razorpay par ye payment nahi mili: ${msg}` };
+  }
+
+  const status = String(payment.status ?? "");
+  if (status !== "captured" && status !== "authorized") {
+    return {
+      ok: false,
+      message: `Razorpay kehta hai ye payment "${status}" hai — paisa aaya hi nahi, isliye booking confirm nahi ki ja sakti.`,
+    };
+  }
+
+  const orderId = payment.order_id ?? null;
+  const booking = await findBookingForPayment(orderId, payment.notes?.bookingCode ?? null);
+
+  if (!booking) {
+    return {
+      ok: false,
+      message: `Payment to safal hai, par iski booking nahi mili. Order ID: ${orderId ?? "—"}. Bookings page par is order ID se dhoondh kar dekhein.`,
+    };
+  }
+
+  if (booking.status !== "PENDING_PAYMENT") {
+    return {
+      ok: true,
+      bookingCode: booking.bookingCode,
+      message: `Booking ${booking.bookingCode} pehle se confirm hai — kuch badla nahi.`,
+    };
+  }
+
+  if (Number(payment.amount) !== booking.amountInPaise) {
+    return {
+      ok: false,
+      bookingCode: booking.bookingCode,
+      message: `Raashi match nahi kar rahi — payment ₹${(
+        Number(payment.amount) / 100
+      ).toFixed(2)}, booking ${booking.bookingCode} ₹${(booking.amountInPaise / 100).toFixed(
+        2,
+      )}. Khud dekh kar faisla karein.`,
+    };
+  }
+
+  // order id kabhi save na hui ho to ab bhar do
+  if (orderId && !booking.providerOrderId) {
+    await db
+      .update(bookings)
+      .set({ providerOrderId: orderId })
+      .where(eq(bookings.id, booking.id))
+      .catch(() => null);
+  }
+
+  await confirmBookingPaid({ bookingId: booking.id, providerPaymentId: paymentId });
+
+  return {
+    ok: true,
+    bookingCode: booking.bookingCode,
+    message: `✓ Booking ${booking.bookingCode} confirm kar di gayi.`,
+  };
+}
+
+/** Razorpay par jitni bhi paid-par-pending payments hain, sabko ek saath confirm karo */
+export async function confirmAllPaidFromGateway(
+  count = 25,
+): Promise<{ confirmed: number; error?: string }> {
+  const review = await reviewGatewayPayments(count);
+  if (!review.ok) return { confirmed: 0, error: review.error };
+
+  let confirmed = 0;
+  for (const row of review.rows) {
+    if (!row.actionable) continue;
+    const r = await attachPayment(row.id).catch(() => null);
+    if (r?.ok) confirmed++;
+  }
+  return { confirmed };
+}
+
 /**
  * Purani adhuri bookings hatana.
  *

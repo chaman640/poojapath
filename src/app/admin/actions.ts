@@ -32,7 +32,12 @@ import {
   loginSchema,
 } from "@/lib/validation";
 import { changeBookingStatus, confirmBookingPaid } from "@/lib/booking-service";
-import { cleanupAbandoned, reconcileBookingById } from "@/lib/payments/reconcile";
+import {
+  attachPayment,
+  cleanupAbandoned,
+  confirmAllPaidFromGateway,
+  reconcileBookingById,
+} from "@/lib/payments/reconcile";
 import { slugify } from "@/lib/utils";
 
 export type ActionState = { error?: string; success?: string };
@@ -673,4 +678,51 @@ export async function cleanupAbandonedAction() {
   revalidatePath("/admin/payments");
   revalidatePath("/admin/bookings");
   redirect(`/admin/payments?cleaned=${removed}`);
+}
+
+/**
+ * Razorpay ki payment ID se booking dhoondh kar confirm karna.
+ *
+ * Ye sabse pakka rasta hai — admin Razorpay dashboard se payment ID
+ * (pay_XXXX) copy karke yahan paste kar deta hai. Status aur raashi
+ * Razorpay se hi poochhi jati hai, admin ke bharose kuch nahi hota.
+ */
+export async function attachPaymentAction(formData: FormData) {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const paymentId = String(formData.get("paymentId") ?? "");
+  const result = await attachPayment(paymentId).catch((err) => ({
+    ok: false,
+    message: `Kuch galat ho gaya: ${err instanceof Error ? err.message : String(err)}`,
+  }));
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+
+  redirect(
+    `/admin/payments?ok=${result.ok ? "1" : "0"}&msg=${encodeURIComponent(result.message)}`,
+  );
+}
+
+/** Razorpay par jitni bhi "paisa aaya par booking pending" payments hain, sab confirm karo */
+export async function confirmAllFromGatewayAction() {
+  const session = await getAdminSession();
+  if (!session) redirect("/admin/login");
+
+  const { confirmed, error } = await confirmAllPaidFromGateway(25).catch((err) => ({
+    confirmed: 0,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+
+  revalidatePath("/admin/payments");
+  revalidatePath("/admin/bookings");
+
+  const msg = error
+    ? `Nahi ho paya: ${error}`
+    : confirmed > 0
+      ? `✓ ${confirmed} booking confirm kar di gayi.`
+      : "Razorpay par aisi koi payment nahi mili jiski booking pending ho.";
+
+  redirect(`/admin/payments?ok=${error ? "0" : "1"}&msg=${encodeURIComponent(msg)}`);
 }

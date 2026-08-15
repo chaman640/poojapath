@@ -3,12 +3,18 @@ import { desc, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { bookings, pujas } from "@/db/schema";
 import { activeProvider, razorpay } from "@/lib/payments";
-import { reconcileAllPending, type ReconcileVerdict } from "@/lib/payments/reconcile";
+import {
+  reconcileAllPending,
+  reviewGatewayPayments,
+  type ReconcileVerdict,
+} from "@/lib/payments/reconcile";
 import { siteConfig } from "@/lib/env";
 import { formatDate, formatINR } from "@/lib/utils";
 import ConfirmSubmit from "@/components/admin/ConfirmSubmit";
 import {
+  attachPaymentAction,
   cleanupAbandonedAction,
+  confirmAllFromGatewayAction,
   forceMarkPaidAction,
   recheckPaymentAction,
 } from "../../actions";
@@ -40,14 +46,36 @@ const VERDICT_STYLE: Record<ReconcileVerdict, { cls: string; label: string }> = 
 export default async function AdminPaymentsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ checked?: string; marked?: string; cleaned?: string }>;
+  searchParams: Promise<{
+    checked?: string;
+    marked?: string;
+    cleaned?: string;
+    ok?: string;
+    msg?: string;
+  }>;
 }) {
   const sp = await searchParams;
   const provider = activeProvider();
 
-  /* ---- Har pending booking ko gateway se milao ---- */
-  const reports = await reconcileAllPending(20).catch(() => []);
+  /* ---- 1. Booking ki taraf se: har pending booking ko gateway se milao ---- */
+  const reconciled = await reconcileAllPending(20).then(
+    (rows) => ({ rows, error: "" }),
+    (err: unknown) => ({
+      rows: [],
+      error: err instanceof Error ? err.message : String(err),
+    }),
+  );
+  const reports = reconciled.rows;
+  const reconcileError = reconciled.error;
   const byId = new Map(reports.map((r) => [r.bookingId, r]));
+
+  /* ---- 2. Gateway ki taraf se: Razorpay par aayi payments ---- */
+  const gateway = await reviewGatewayPayments(25).catch((err) => ({
+    ok: false as const,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+  const gatewayRows = gateway.ok ? gateway.rows : [];
+  const stranded = gatewayRows.filter((r) => r.actionable);
 
   /* ---- Milaan ke baad ki taaza list ---- */
   const [rows, [counts]] = await Promise.all([
@@ -142,6 +170,22 @@ export default async function AdminPaymentsPage({
       </div>
 
       {/* ---------- Result messages ---------- */}
+      {sp.msg && (
+        <p
+          className={`rounded-xl border px-4 py-3 text-[13.5px] ${
+            sp.ok === "1"
+              ? "border-green-300 bg-green-50 text-green-800"
+              : "border-red-300 bg-red-50 text-red-800"
+          }`}
+        >
+          {sp.msg}
+        </p>
+      )}
+      {reconcileError && (
+        <p className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-[13.5px] text-red-800">
+          Pending bookings ka milaan nahi ho paya: {reconcileError}
+        </p>
+      )}
       {justConfirmed > 0 && (
         <p className="rounded-xl border border-green-300 bg-green-50 px-4 py-3 text-[13.5px] text-green-800">
           ✓ {justConfirmed} booking ka paisa gateway par mila — abhi confirm kar di gayi.
@@ -163,6 +207,130 @@ export default async function AdminPaymentsPage({
           nahi mila.
         </p>
       )}
+
+      {/* ---------- Razorpay ki taraf se milaan ---------- */}
+      <section className="card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-saffron-100 px-5 py-3.5">
+          <div>
+            <h2 className="text-base">Razorpay par aayi payments</h2>
+            <p className="mt-0.5 text-[12.5px] text-ink/55">
+              Seedha Razorpay se poochh kar — har payment ko uski booking se joda gaya hai
+            </p>
+          </div>
+          {stranded.length > 0 && (
+            <form action={confirmAllFromGatewayAction}>
+              <button type="submit" className="btn-primary px-5 py-2.5">
+                💰 {stranded.length} payment ki booking confirm karein
+              </button>
+            </form>
+          )}
+        </div>
+
+        {!gateway.ok ? (
+          <p className="m-5 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-[13.5px] leading-relaxed text-red-800">
+            Razorpay se payments list nahi mil payi: {gateway.error}
+            <br />
+            <span className="text-[12.5px]">
+              Aksar iska matlab hota hai ki <code>RAZORPAY_KEY_ID</code> /{" "}
+              <code>RAZORPAY_KEY_SECRET</code> galat hain ya Render me set nahi hain.
+            </span>
+          </p>
+        ) : gatewayRows.length === 0 ? (
+          <p className="p-10 text-center text-[14px] text-ink/50">
+            Razorpay par abhi tak koi payment nahi aayi.
+          </p>
+        ) : (
+          <ul className="divide-y divide-saffron-50">
+            {gatewayRows.map((p) => (
+              <li
+                key={p.id}
+                className={p.actionable ? "bg-amber-50/60 px-5 py-4" : "px-5 py-4"}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-mono text-[12.5px] font-bold text-maroon-800">{p.id}</p>
+                    <p className="mt-0.5 text-[13px] text-ink/70">
+                      <span className="font-semibold">{formatINR(p.amount)}</span>
+                      {p.method && <> • {p.method}</>}
+                      {p.contact && <> • {p.contact}</>}
+                      {p.createdAt && <> • {formatDate(new Date(p.createdAt * 1000), "en")}</>}
+                    </p>
+                    <p className="mt-0.5 text-[11.5px] text-ink/45">
+                      Order: <code className="font-mono">{p.orderId ?? "—"}</code>
+                      {p.bookingCode && (
+                        <>
+                          {" "}• Booking:{" "}
+                          <Link
+                            href={`/admin/bookings?q=${encodeURIComponent(p.bookingCode)}`}
+                            className="font-mono font-semibold text-saffron-700 hover:underline"
+                          >
+                            {p.bookingCode}
+                          </Link>
+                        </>
+                      )}
+                    </p>
+                  </div>
+
+                  <span
+                    className={`shrink-0 rounded-full px-3 py-1 text-[11.5px] font-bold ${
+                      p.status === "captured"
+                        ? "bg-green-100 text-green-800"
+                        : p.status === "authorized"
+                          ? "bg-blue-100 text-blue-800"
+                          : p.status === "failed"
+                            ? "bg-red-100 text-red-800"
+                            : "bg-slate-200 text-slate-700"
+                    }`}
+                  >
+                    {p.status}
+                  </span>
+                </div>
+
+                <p className="mt-2 text-[12.5px] leading-relaxed text-ink/70">{p.note}</p>
+
+                {p.actionable && (
+                  <form action={attachPaymentAction} className="mt-2">
+                    <input type="hidden" name="paymentId" value={p.id} />
+                    <button
+                      type="submit"
+                      className="rounded-full bg-green-600 px-4 py-2 text-[12.5px] font-bold text-white hover:bg-green-700"
+                    >
+                      Jodein aur confirm karein
+                    </button>
+                  </form>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* Manual paste */}
+        <form
+          action={attachPaymentAction}
+          className="flex flex-wrap items-end gap-3 border-t border-saffron-100 bg-saffron-50/40 px-5 py-4"
+        >
+          <div className="min-w-[240px] flex-1">
+            <label className="label" htmlFor="paymentId">
+              Ya Razorpay ki Payment ID paste karein
+            </label>
+            <p className="-mt-1 mb-1.5 text-[11.5px] text-ink/45">
+              Razorpay Dashboard → Payments me se copy karein, jaise pay_TQ1KNZ84kUwj8O.
+              Hum khud Razorpay se poochh kar uski booking confirm kar denge.
+            </p>
+            <input
+              id="paymentId"
+              name="paymentId"
+              required
+              maxLength={40}
+              placeholder="pay_XXXXXXXXXXXX"
+              className="input font-mono text-[13px]"
+            />
+          </div>
+          <button type="submit" className="btn-secondary px-5 py-2.5">
+            Dhoondh kar confirm karein
+          </button>
+        </form>
+      </section>
 
       {/* ---------- Setup health ---------- */}
       <section className="card overflow-hidden">

@@ -128,6 +128,54 @@ export async function fetchOrder(orderId: string) {
   return getClient().orders.fetch(orderId);
 }
 
+export type RecentPayment = OrderPayment & {
+  orderId: string | null;
+  bookingCodeHint: string | null;
+  contact: string | null;
+  email: string | null;
+};
+
+/**
+ * Razorpay par aayi pichhli payments — ulti taraf se milaan ke liye.
+ *
+ * `fetchOrderPayments` humari booking se shuru hoti hai. Lekin agar kisi
+ * wajah se booking par order id save hi na hui ho, to us raaste se wo
+ * payment kabhi nahi milegi. Isliye ye function Razorpay ki taraf se
+ * shuru karta hai: "tumhare paas kya-kya aaya hai?" — phir hum har payment
+ * ko apni booking se jodne ki koshish karte hain.
+ */
+export async function fetchRecentPayments(count = 25): Promise<RecentPayment[]> {
+  const res = (await getClient().payments.all({
+    count: Math.min(Math.max(count, 1), 100),
+  })) as unknown as {
+    items?: Array<{
+      id: string;
+      status: string;
+      amount: number | string;
+      method?: string;
+      order_id?: string | null;
+      error_description?: string | null;
+      created_at?: number;
+      contact?: string | number | null;
+      email?: string | null;
+      notes?: Record<string, string> | null;
+    }>;
+  };
+
+  return (res?.items ?? []).map((p) => ({
+    id: p.id,
+    status: String(p.status),
+    amount: Number(p.amount),
+    method: p.method ?? null,
+    errorDescription: p.error_description ?? null,
+    createdAt: p.created_at ?? null,
+    orderId: p.order_id ?? null,
+    bookingCodeHint: p.notes?.bookingCode ?? null,
+    contact: p.contact != null ? String(p.contact) : null,
+    email: p.email ?? null,
+  }));
+}
+
 /** Sirf dikhane ke liye — poori key kabhi log/screen par nahi jani chahiye */
 export function maskedKeyId(): string {
   const k = process.env.RAZORPAY_KEY_ID?.trim();

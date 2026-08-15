@@ -226,6 +226,26 @@ Booking confirm hone ke **teen** raaste hain. Pehle do toot sakte hain, teesra h
 
 Isliye agar kabhi "payment ho gaya par pending dikh raha hai" jaisa lage, to **Admin → Payments** khol lein. Jinka paisa aa chuka hoga wo wahin confirm ho jayengi.
 
+#### Sabse pakka rasta — Razorpay ki taraf se milaan
+
+Admin → Payments page par upar hi ek hissa hai: **"Razorpay par aayi payments"**.
+Ye humari bookings se shuru nahi karta, seedha Razorpay se poochhta hai
+*"tumhare paas kya-kya aaya hai?"* — aur phir har payment ko uski booking se
+jodta hai. Booking dhoondne ke teen raaste hain, ek fail ho to doosra:
+
+1. booking par save ki hui order id
+2. order ka `receipt` (usme humne bookingCode hi bhara tha)
+3. order ke `notes.bookingCode`
+
+Isliye agar kisi booking par order id save hi na hui ho, tab bhi paisa apni
+booking tak pahunch jata hai. Jis payment ka paisa aa chuka hai par booking
+pending hai, uske saamne **"Jodein aur confirm karein"** button aa jata hai —
+ya upar se ek baar me sabko confirm kar dein.
+
+Agar kabhi list me koi payment na dikhe, to Razorpay Dashboard → Payments se
+**Payment ID (pay_XXXX)** copy karke neeche wale box me paste kar dein. Hum
+Razorpay se status aur raashi khud poochh kar booking confirm kar denge.
+
 #### Admin → Payments page kya batata hai
 
 | Nishaan | Matlab | Kya karna hai |

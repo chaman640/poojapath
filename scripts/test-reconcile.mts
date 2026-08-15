@@ -28,8 +28,23 @@ process.env.WHATSAPP_PROVIDER = "none";
 
 /* ---------------- Nakli Razorpay ---------------- */
 
-type Attempt = { id: string; status: string; amount: number; method?: string; error_description?: string };
+type Attempt = {
+  id: string;
+  status: string;
+  amount: number;
+  method?: string;
+  error_description?: string;
+  order_id?: string | null;
+  notes?: Record<string, string>;
+};
+
+/** order id → us order par hui payments ("boom" = network fail) */
 const ORDERS: Record<string, Attempt[] | "boom"> = {};
+/** order id → order ka apna record (receipt/notes) */
+const ORDER_META: Record<string, { receipt?: string; notes?: Record<string, string> }> = {};
+/** Razorpay ke "saare payments" wali list */
+let ALL_PAYMENTS: Attempt[] = [];
+let ALL_PAYMENTS_FAIL = false;
 
 // Razorpay SDK CommonJS axios use karta hai — usi instance ka adapter badalna hai
 const cjsAxios = req("axios");
@@ -38,29 +53,60 @@ const cjsAxios = req("axios");
   [k: string]: unknown;
 }) => {
   const url = String(config.url ?? "");
-  const m = url.match(/\/orders\/([^/]+)\/payments/);
-  if (!m) throw new Error(`test: unexpected call ${url}`);
-
-  const items = ORDERS[m[1]];
-  if (items === "boom" || items === undefined) {
-    const err = new Error("getaddrinfo ENOTFOUND api.razorpay.com");
-    throw err;
-  }
-
-  return {
-    data: { entity: "collection", count: items.length, items },
+  const ok = (data: unknown) => ({
+    data,
     status: 200,
     statusText: "OK",
     headers: {},
     config,
-  };
+  });
+
+  // GET /orders/{id}/payments
+  const op = url.match(/\/orders\/([^/?]+)\/payments/);
+  if (op) {
+    const items = ORDERS[op[1]];
+    if (items === "boom" || items === undefined) {
+      throw new Error("getaddrinfo ENOTFOUND api.razorpay.com");
+    }
+    return ok({ entity: "collection", count: items.length, items });
+  }
+
+  // GET /orders/{id}
+  const o = url.match(/\/orders\/([^/?]+)$/);
+  if (o) {
+    const meta = ORDER_META[o[1]];
+    if (!meta) throw new Error("order not found");
+    return ok({ id: o[1], ...meta });
+  }
+
+  // GET /payments/{id}
+  const p = url.match(/\/payments\/([^/?]+)$/);
+  if (p) {
+    const found = ALL_PAYMENTS.find((x) => x.id === p[1]);
+    if (!found) throw new Error("payment not found");
+    return ok(found);
+  }
+
+  // GET /payments?count=…
+  if (/\/payments(\?|$)/.test(url)) {
+    if (ALL_PAYMENTS_FAIL) throw new Error("401 unauthorized — key galat hai");
+    return ok({ entity: "collection", count: ALL_PAYMENTS.length, items: ALL_PAYMENTS });
+  }
+
+  throw new Error(`test: unexpected call ${url}`);
 };
 
 /* ---------------- Test ---------------- */
 
 const { db, pool } = await import("../src/db");
 const { bookings, packages, pujas } = await import("../src/db/schema");
-const { reconcileBooking, cleanupAbandoned } = await import("../src/lib/payments/reconcile");
+const {
+  reconcileBooking,
+  cleanupAbandoned,
+  attachPayment,
+  reviewGatewayPayments,
+  confirmAllPaidFromGateway,
+} = await import("../src/lib/payments/reconcile");
 const { eq } = await import("drizzle-orm");
 
 let pass = 0;
@@ -256,6 +302,114 @@ console.log("\n🧪 Reconcile engine test\n");
   check("jiska payment hua hi nahi → CANCELLED", (await statusOf(dead.id)).s, "CANCELLED");
   check("jiska jawab nahi mila → chhua nahi", (await statusOf(unknown.id)).s, "PENDING_PAYMENT");
   check("jiska paisa aaya tha → CONFIRMED (cancel nahi!)", (await statusOf(paid.id)).s, "CONFIRMED");
+}
+
+/* ==================================================================
+   Gateway ki taraf se milaan — jab booking par order id hi na bachi ho
+   ================================================================== */
+
+console.log("\n─── Razorpay ki taraf se milaan ───");
+
+/* 11. Order id save hi nahi hui thi → receipt (bookingCode) se dhoondho */
+{
+  const b = await makeBooking({ orderId: null, amount: 1100 });
+  ORDER_META["order_lost"] = { receipt: b.bookingCode, notes: { bookingCode: b.bookingCode } };
+  ALL_PAYMENTS = [
+    { id: "pay_lost", status: "captured", amount: 1100, method: "upi", order_id: "order_lost" },
+  ];
+
+  const r = await attachPayment("pay_lost");
+  const after = await statusOf(b.id);
+  const [saved] = await db
+    .select({ o: bookings.providerOrderId })
+    .from(bookings)
+    .where(eq(bookings.id, b.id));
+
+  console.log("\n11) Booking par order id thi hi nahi (aapka case ho sakta hai)");
+  check("attach safal", r.ok, true);
+  check("booking confirm hui", after.s, "CONFIRMED");
+  check("payment id save hua", after.pid, "pay_lost");
+  check("order id ab bhar diya gaya", saved.o, "order_lost");
+}
+
+/* 12. Fail payment ko kabhi confirm mat karo */
+{
+  const b = await makeBooking({ orderId: "order_f2", amount: 1100 });
+  ORDER_META["order_f2"] = { receipt: b.bookingCode };
+  ALL_PAYMENTS = [
+    { id: "pay_f2", status: "failed", amount: 1100, order_id: "order_f2" },
+  ];
+
+  const r = await attachPayment("pay_f2");
+  console.log("\n12) Fail payment paste ki gayi");
+  check("mana kiya", r.ok, false);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* 13. Raashi alag ho to kabhi confirm mat karo */
+{
+  const b = await makeBooking({ orderId: "order_m2", amount: 165100 });
+  ORDER_META["order_m2"] = { receipt: b.bookingCode };
+  ALL_PAYMENTS = [
+    { id: "pay_m2", status: "captured", amount: 100, order_id: "order_m2" },
+  ];
+
+  const r = await attachPayment("pay_m2");
+  console.log("\n13) ₹1 aaya par booking ₹1,651 ki hai");
+  check("mana kiya", r.ok, false);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* 14. Galat payment id */
+{
+  const r = await attachPayment("kuch-bhi");
+  console.log("\n14) Galat format ki payment ID");
+  check("mana kiya", r.ok, false);
+}
+
+/* 15. Poori list ka milaan + ek saath sabko confirm karna */
+{
+  const b1 = await makeBooking({ orderId: "order_g1", amount: 1100 });
+  const b2 = await makeBooking({ orderId: "order_g2", amount: 1100 });
+  const b3 = await makeBooking({ orderId: "order_g3", amount: 1100 });
+  ORDER_META["order_g1"] = { receipt: b1.bookingCode };
+  ORDER_META["order_g2"] = { receipt: b2.bookingCode };
+  ORDER_META["order_g3"] = { receipt: b3.bookingCode };
+
+  ALL_PAYMENTS = [
+    { id: "pay_g1", status: "captured", amount: 1100, method: "upi", order_id: "order_g1" },
+    { id: "pay_g2", status: "captured", amount: 1100, method: "upi", order_id: "order_g2" },
+    { id: "pay_g3", status: "failed", amount: 1100, method: "upi", order_id: "order_g3" },
+    { id: "pay_gx", status: "captured", amount: 5000, method: "card", order_id: "order_unknown" },
+  ];
+
+  const review = await reviewGatewayPayments(25);
+  console.log("\n15) Razorpay ki poori list ka milaan");
+  check("list mil gayi", review.ok, true);
+
+  if (review.ok) {
+    const actionable = review.rows.filter((r) => r.actionable).map((r) => r.id).sort();
+    check("sirf 2 payment par kaam baaki", actionable.join(","), "pay_g1,pay_g2");
+    const orphan = review.rows.find((r) => r.id === "pay_gx");
+    check("anjaan payment ki booking nahi mili", orphan?.bookingId, null);
+    const failed = review.rows.find((r) => r.id === "pay_g3");
+    check("fail payment actionable nahi", failed?.actionable, false);
+  }
+
+  const { confirmed } = await confirmAllPaidFromGateway(25);
+  check("dono ek saath confirm hue", confirmed, 2);
+  check("b1 confirm", (await statusOf(b1.id)).s, "CONFIRMED");
+  check("b2 confirm", (await statusOf(b2.id)).s, "CONFIRMED");
+  check("b3 (fail wali) pending hi rahi", (await statusOf(b3.id)).s, "PENDING_PAYMENT");
+}
+
+/* 16. Razorpay se list hi na mile to saaf error mile, crash na ho */
+{
+  ALL_PAYMENTS_FAIL = true;
+  const review = await reviewGatewayPayments(25);
+  console.log("\n16) Razorpay keys galat / list nahi mili");
+  check("ok=false mila", review.ok, false);
+  ALL_PAYMENTS_FAIL = false;
 }
 
 /* ---------------- Safai ---------------- */
