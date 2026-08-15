@@ -51,6 +51,7 @@ scripts/
   load-env.ts
   migrate.ts
   seed.ts
+  test-payment-flow.mts
   test-reconcile.mts
 src/
   app/
@@ -159,6 +160,7 @@ src/
     HowItWorks.tsx
     LanguageProvider.tsx
     Navbar.tsx
+    PaidWhatsappRedirect.tsx
     PendingPaymentWatcher.tsx
     PujaCard.tsx
     PujaImage.tsx
@@ -2000,6 +2002,377 @@ if (existsSync(envPath)) {
 }
 
 export {};
+</file>
+
+<file path="scripts/test-payment-flow.mts">
+/**
+ * Payment ke baad ka poora raasta test — asli route handlers, asli signature.
+ *
+ *   npx tsx scripts/test-payment-flow.mts
+ *
+ * Yahan koi nakli booking-logic nahi hai. Wahi callback route aur wahi webhook
+ * route chalte hain jo production me chalte hain. Sirf Razorpay ke jawab nakli
+ * hain (sandbox se api.razorpay.com tak nahi pahuncha ja sakta).
+ */
+import "./load-env.ts";
+
+import { createHmac } from "node:crypto";
+import { createRequire } from "node:module";
+
+const req = createRequire(import.meta.url);
+const serverOnly = req.resolve("server-only");
+req.cache[serverOnly] = {
+  id: serverOnly,
+  filename: serverOnly,
+  loaded: true,
+  exports: {},
+} as unknown as NodeModule;
+
+const KEY_SECRET = "secret_for_test";
+process.env.RAZORPAY_KEY_ID = "rzp_live_flowtest";
+process.env.RAZORPAY_KEY_SECRET = KEY_SECRET;
+process.env.RAZORPAY_WEBHOOK_SECRET = "webhook_secret_test";
+process.env.PAYMENT_PROVIDER = "razorpay";
+process.env.WHATSAPP_PROVIDER = "none";
+process.env.NEXT_PUBLIC_SITE_URL = "https://anusthanpooja.site";
+
+/* ---------------- Nakli Razorpay ---------------- */
+
+type Pay = {
+  id: string;
+  status: string;
+  amount: number;
+  order_id: string | null;
+  method?: string;
+};
+const PAYMENTS: Record<string, Pay> = {};
+
+const cjsAxios = req("axios");
+(cjsAxios.default ?? cjsAxios).defaults.adapter = async (config: {
+  url?: string;
+  [k: string]: unknown;
+}) => {
+  const url = String(config.url ?? "");
+  const ok = (data: unknown) => ({
+    data,
+    status: 200,
+    statusText: "OK",
+    headers: {},
+    config,
+  });
+
+  const op = url.match(/\/orders\/([^/?]+)\/payments/);
+  if (op) {
+    const items = Object.values(PAYMENTS).filter((p) => p.order_id === op[1]);
+    return ok({ entity: "collection", count: items.length, items });
+  }
+
+  const o = url.match(/\/orders\/([^/?]+)$/);
+  if (o) return ok({ id: o[1], receipt: null, notes: {} });
+
+  const p = url.match(/\/payments\/([^/?]+)$/);
+  if (p) {
+    const found = PAYMENTS[p[1]];
+    if (!found) throw new Error("payment not found");
+    return ok(found);
+  }
+
+  if (/\/payments(\?|$)/.test(url)) {
+    return ok({
+      entity: "collection",
+      count: Object.keys(PAYMENTS).length,
+      items: Object.values(PAYMENTS),
+    });
+  }
+
+  throw new Error(`test: unexpected call ${url}`);
+};
+
+/* ---------------- Imports ---------------- */
+
+const { db, pool } = await import("../src/db");
+const { bookings, packages, pujas } = await import("../src/db/schema");
+const { eq } = await import("drizzle-orm");
+const callback = await import("../src/app/api/payment/razorpay/callback/route");
+const webhook = await import("../src/app/api/payment/webhook/route");
+
+let pass = 0;
+let fail = 0;
+function check(name: string, got: unknown, want: unknown) {
+  if (got === want) {
+    console.log(`  ✅ ${name}`);
+    pass++;
+  } else {
+    console.log(`  ❌ ${name}\n       mila:    ${String(got)}\n       chahiye: ${String(want)}`);
+    fail++;
+  }
+}
+
+const TEST_PHONE = "+919876500088";
+await db.delete(bookings).where(eq(bookings.phone, TEST_PHONE));
+
+async function makeBooking(orderId: string, amount: number) {
+  const [puja] = await db.select({ id: pujas.id }).from(pujas).limit(1);
+  const [pkg] = await db
+    .select({ id: packages.id })
+    .from(packages)
+    .where(eq(packages.pujaId, puja.id))
+    .limit(1);
+
+  const [row] = await db
+    .insert(bookings)
+    .values({
+      bookingCode: `FLOW-${Math.random().toString(36).slice(2, 9).toUpperCase()}`,
+      pujaId: puja.id,
+      packageId: pkg.id,
+      devoteeName: "Flow Test",
+      gotra: "Kashyap",
+      phone: TEST_PHONE,
+      amountInPaise: amount,
+      packageAmountInPaise: amount,
+      status: "PENDING_PAYMENT",
+      paymentStatus: "CREATED",
+      paymentProvider: "razorpay",
+      providerOrderId: orderId,
+      whatsappOptIn: false,
+    })
+    .returning();
+  return row;
+}
+
+async function statusOf(id: string) {
+  const [r] = await db
+    .select({ s: bookings.status, p: bookings.paymentStatus })
+    .from(bookings)
+    .where(eq(bookings.id, id))
+    .limit(1);
+  return r;
+}
+
+function checkoutSignature(orderId: string, paymentId: string) {
+  return createHmac("sha256", KEY_SECRET).update(`${orderId}|${paymentId}`).digest("hex");
+}
+
+function formRequest(fields: Record<string, string>) {
+  const body = new URLSearchParams(fields).toString();
+  return new Request("https://anusthanpooja.site/api/payment/razorpay/callback", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      host: "anusthanpooja.site",
+      "x-forwarded-proto": "https",
+    },
+    body,
+  });
+}
+
+function webhookRequest(payload: unknown, secret = "webhook_secret_test") {
+  const raw = JSON.stringify(payload);
+  const sig = createHmac("sha256", secret).update(raw).digest("hex");
+  return new Request("https://anusthanpooja.site/api/payment/webhook", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-razorpay-signature": sig },
+    body: raw,
+  });
+}
+
+console.log("\n🧪 Payment ke baad ka poora raasta\n");
+
+/* ---------- 1. Browser callback: sab kuch sahi ---------- */
+{
+  const b = await makeBooking("order_cb1", 100);
+  PAYMENTS["pay_cb1"] = { id: "pay_cb1", status: "captured", amount: 100, order_id: "order_cb1" };
+
+  const res = await callback.POST(
+    formRequest({
+      razorpay_order_id: "order_cb1",
+      razorpay_payment_id: "pay_cb1",
+      razorpay_signature: checkoutSignature("order_cb1", "pay_cb1"),
+    }),
+  );
+  const html = await res.text();
+  const after = await statusOf(b.id);
+
+  console.log("1) Razorpay ne callback kiya (₹1, captured)");
+  check("HTTP 200", res.status, 200);
+  check("booking CONFIRMED", after.s, "CONFIRMED");
+  check("redirect booking page par", html.includes(`/booking/${b.bookingCode}`), true);
+  check("paid=1 laga", html.includes("paid=1"), true);
+}
+
+/* ---------- 2. Callback: signature naqli ---------- */
+{
+  const b = await makeBooking("order_cb2", 100);
+  PAYMENTS["pay_cb2"] = { id: "pay_cb2", status: "captured", amount: 100, order_id: "order_cb2" };
+
+  const res = await callback.POST(
+    formRequest({
+      razorpay_order_id: "order_cb2",
+      razorpay_payment_id: "pay_cb2",
+      razorpay_signature: "0".repeat(64),
+    }),
+  );
+  const html = await res.text();
+
+  console.log("\n2) Naqli signature ke saath callback");
+  check("booking confirm NAHI hui", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+  check("track par bheja gaya", html.includes("/track?error=verify"), true);
+}
+
+/* ---------- 3. Callback: payment abhi 'created' hai ---------- */
+{
+  const b = await makeBooking("order_cb3", 100);
+  PAYMENTS["pay_cb3"] = { id: "pay_cb3", status: "created", amount: 100, order_id: "order_cb3" };
+
+  const res = await callback.POST(
+    formRequest({
+      razorpay_order_id: "order_cb3",
+      razorpay_payment_id: "pay_cb3",
+      razorpay_signature: checkoutSignature("order_cb3", "pay_cb3"),
+    }),
+  );
+  const html = await res.text();
+
+  console.log("\n3) Callback aaya par Razorpay abhi 'created' keh raha hai");
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+  check("pending=1 dikhaya", html.includes("pending=1"), true);
+}
+
+/* ---------- 4. Webhook: payment.captured ---------- */
+{
+  const b = await makeBooking("order_wh1", 100);
+  const res = await webhook.POST(
+    webhookRequest({
+      event: "payment.captured",
+      payload: {
+        payment: { entity: { id: "pay_wh1", order_id: "order_wh1", amount: 100 } },
+      },
+    }),
+  );
+
+  console.log("\n4) Webhook: payment.captured");
+  check("HTTP 200", res.status, 200);
+  check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
+}
+
+/* ---------- 5. Webhook: order.paid ---------- */
+{
+  const b = await makeBooking("order_wh2", 100);
+  const res = await webhook.POST(
+    webhookRequest({
+      event: "order.paid",
+      payload: {
+        payment: { entity: { id: "pay_wh2", order_id: "order_wh2", amount: 100 } },
+        order: { entity: { id: "order_wh2" } },
+      },
+    }),
+  );
+
+  console.log("\n5) Webhook: order.paid");
+  check("HTTP 200", res.status, 200);
+  check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
+}
+
+/* ---------- 6. Webhook: galat secret ---------- */
+{
+  const b = await makeBooking("order_wh3", 100);
+  const res = await webhook.POST(
+    webhookRequest(
+      {
+        event: "payment.captured",
+        payload: { payment: { entity: { id: "pay_wh3", order_id: "order_wh3", amount: 100 } } },
+      },
+      "GALAT_SECRET",
+    ),
+  );
+
+  console.log("\n6) Webhook galat secret ke saath (Render me secret alag ho to yahi hoga)");
+  check("HTTP 401", res.status, 401);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* ---------- 7. Webhook: raashi alag ---------- */
+{
+  const b = await makeBooking("order_wh4", 165100);
+  await webhook.POST(
+    webhookRequest({
+      event: "payment.captured",
+      payload: { payment: { entity: { id: "pay_wh4", order_id: "order_wh4", amount: 100 } } },
+    }),
+  );
+
+  console.log("\n7) Webhook me raashi alag");
+  check("booking confirm NAHI hui", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* ---------- 8. Webhook + callback dono aa gaye ---------- */
+{
+  const b = await makeBooking("order_both", 100);
+  PAYMENTS["pay_both"] = {
+    id: "pay_both",
+    status: "captured",
+    amount: 100,
+    order_id: "order_both",
+  };
+
+  const [before] = await db
+    .select({ n: pujas.seatsBooked })
+    .from(pujas)
+    .where(eq(pujas.id, b.pujaId));
+
+  await webhook.POST(
+    webhookRequest({
+      event: "payment.captured",
+      payload: { payment: { entity: { id: "pay_both", order_id: "order_both", amount: 100 } } },
+    }),
+  );
+  await callback.POST(
+    formRequest({
+      razorpay_order_id: "order_both",
+      razorpay_payment_id: "pay_both",
+      razorpay_signature: checkoutSignature("order_both", "pay_both"),
+    }),
+  );
+
+  const [after] = await db
+    .select({ n: pujas.seatsBooked })
+    .from(pujas)
+    .where(eq(pujas.id, b.pujaId));
+
+  console.log("\n8) Webhook aur callback dono aaye");
+  check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
+  check("seat sirf 1 hi badhi", after.n - before.n, 1);
+}
+
+/* ---------- 9. Callback ka GET (Razorpay kabhi GET bhi karta hai) ---------- */
+{
+  const b = await makeBooking("order_get", 100);
+  const res = await callback.GET(
+    new Request(
+      "https://anusthanpooja.site/api/payment/razorpay/callback?razorpay_order_id=order_get",
+      { headers: { host: "anusthanpooja.site", "x-forwarded-proto": "https" } },
+    ),
+  );
+  const html = await res.text();
+
+  console.log("\n9) Callback par GET aaya");
+  check("HTTP 200", res.status, 200);
+  check("sahi booking page par bheja", html.includes(`/booking/${b.bookingCode}`), true);
+}
+
+/* ---------- 10. Webhook URL browser me kholna ---------- */
+{
+  const res = await webhook.GET();
+  const json = (await res.json()) as { endpoint?: string };
+  console.log("\n10) Webhook URL browser me kholne par");
+  check("HTTP 200", res.status, 200);
+  check("sahi endpoint bataya", json.endpoint, "razorpay-webhook");
+}
+
+await db.delete(bookings).where(eq(bookings.phone, TEST_PHONE));
+console.log(`\n${fail === 0 ? "✨" : "⚠️"}  ${pass} pass, ${fail} fail\n`);
+await pool.end();
+process.exit(fail === 0 ? 0 : 1);
 </file>
 
 <file path="src/app/(site)/about/page.tsx">
@@ -5397,6 +5770,98 @@ export default function Navbar() {
         </div>
       )}
     </header>
+  );
+}
+</file>
+
+<file path="src/components/PaidWhatsappRedirect.tsx">
+"use client";
+
+import { useEffect, useState } from "react";
+
+/**
+ * Payment ke turant baad WhatsApp khol dena.
+ *
+ * Booking confirm hote hi ye ek chhota sa countdown dikhata hai aur phir
+ * WhatsApp khol deta hai — message me poori booking (ID, naam, gotra,
+ * number, puja, tithi, raashi) pehle se bhari hoti hai. Grahak ko bas
+ * "send" dabana hota hai, aur aapke paas har booking WhatsApp me aa jati hai.
+ *
+ * Teen baatein jaan-boojh kar rakhi gayi hain:
+ *
+ *  1. **Sirf abhi wali booking par** — purani booking dobara kholne par
+ *     WhatsApp nahi khulta. Ye faisla server par hota hai: ya to Razorpay
+ *     `?paid=1` lagakar bheje, ya booking pichhle 5 minute me confirm hui ho.
+ *  2. **Rok sakte hain** — countdown ke saath "Rehne dein" bhi hai. Kisi ko
+ *     zabardasti doosri app me nahi bhejte.
+ *  3. **Dobara nahi khulega** — chalte hi URL me `wa=done` laga dete hain,
+ *     isliye back dabane ya refresh karne par ye phir se nahi chalega.
+ */
+export default function PaidWhatsappRedirect({
+  link,
+  seconds = 3,
+  hi,
+}: {
+  link: string;
+  seconds?: number;
+  hi: boolean;
+}) {
+  const [left, setLeft] = useState(seconds);
+  const [stopped, setStopped] = useState(false);
+
+  // URL me nishaan laga do — refresh ya back dabane par dobara na khule
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("paid");
+      url.searchParams.set("wa", "done");
+      window.history.replaceState(null, "", url.toString());
+    } catch {
+      /* purane browser — koi baat nahi */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (stopped) return;
+
+    if (left <= 0) {
+      window.location.href = link;
+      return;
+    }
+
+    const id = setTimeout(() => setLeft((n) => n - 1), 1000);
+    return () => clearTimeout(id);
+  }, [left, stopped, link]);
+
+  if (stopped) return null;
+
+  return (
+    <div className="mt-5 rounded-2xl border-2 border-[#25D366] bg-[#25D366]/10 p-4 text-center">
+      <p className="text-[15px] font-bold text-maroon-800">
+        {hi ? `📲 व्हाट्सएप खुल रहा है… ${left}` : `📲 Opening WhatsApp… ${left}`}
+      </p>
+      <p className="mt-1 text-[13px] leading-relaxed text-ink/65">
+        {hi
+          ? "आपकी पूरी बुकिंग का संदेश तैयार है — बस भेज दीजिए, हमें आपकी जानकारी मिल जाएगी।"
+          : "Your full booking message is ready — just press send and we'll have your details."}
+      </p>
+
+      <div className="mt-3 flex flex-wrap justify-center gap-2">
+        <a
+          href={link}
+          className="btn rounded-full bg-[#25D366] px-6 py-2.5 text-[14px] font-bold text-white"
+        >
+          {hi ? "अभी खोलें" : "Open now"}
+        </a>
+        <button
+          type="button"
+          onClick={() => setStopped(true)}
+          className="btn rounded-full border border-saffron-300 bg-white px-5 py-2.5 text-[14px] font-semibold text-maroon-800"
+        >
+          {hi ? "रहने दें" : "Not now"}
+        </button>
+      </div>
+    </div>
   );
 }
 </file>
@@ -11510,52 +11975,6 @@ export function maskPhone(phone: string): string {
 }
 </file>
 
-<file path="package.json">
-{
-  "name": "pooja-path",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint .",
-    "db:migrate": "tsx scripts/migrate.ts",
-    "db:seed": "tsx scripts/seed.ts",
-    "db:generate": "npx drizzle-kit@0.31.10 generate",
-    "test:reconcile": "tsx scripts/test-reconcile.mts",
-    "render-build": "npm run db:migrate && npm run db:seed && next build"
-  },
-  "dependencies": {
-    "bcryptjs": "^3.0.2",
-    "drizzle-orm": "^0.45.2",
-    "jose": "^6.0.12",
-    "next": "16.3.0",
-    "pg": "^8.16.3",
-    "razorpay": "^2.9.6",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "server-only": "^0.0.1",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@eslint/eslintrc": "^3.3.6",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/node": "^22",
-    "@types/pg": "^8.15.5",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.0",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.17",
-    "tsx": "^4.20.3",
-    "typescript": "^5.9.2"
-  }
-}
-</file>
-
 <file path="src/app/(site)/pujas/[slug]/page.tsx">
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
@@ -14564,330 +14983,50 @@ export async function resolveAddons(pujaId: string, addonIds: string[]) {
 }
 </file>
 
-<file path="src/app/(site)/booking/[code]/page.tsx">
-import type { Metadata } from "next";
-import Link from "next/link";
-import { notFound } from "next/navigation";
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { bookingEvents } from "@/db/schema";
-import PujaImage from "@/components/PujaImage";
-import BookingTimeline from "@/components/BookingTimeline";
-import PendingPaymentWatcher from "@/components/PendingPaymentWatcher";
-import { reconcileByBookingCode } from "@/lib/payments/reconcile";
-import { getLangDict } from "@/lib/lang-server";
-import { pick } from "@/lib/i18n";
-import { formatDate, formatINR, maskPhone } from "@/lib/utils";
-import { siteConfig } from "@/lib/env";
-import { getBookingAddons, getBookingByCode } from "@/lib/queries";
-
-export const metadata: Metadata = {
-  title: "Booking Status",
-  robots: { index: false, follow: false },
-};
-
-type Params = Promise<{ code: string }>;
-type Search = Promise<{ paid?: string; pending?: string; failed?: string }>;
-
-export default async function BookingStatusPage({
-  params,
-  searchParams,
-}: {
-  params: Params;
-  searchParams: Search;
-}) {
-  const { code } = await params;
-  const sp = await searchParams;
-  const { lang, t } = await getLangDict();
-
-  const plainCode = decodeURIComponent(code);
-
-  /**
-   * Page khulte hi gateway se poochh lo ki paisa aaya ya nahi.
-   *
-   * Callback ya webhook chuk bhi jaye to booking yahin apne aap confirm
-   * ho jati hai — user ko "payment pending" dekh kar ghabrana nahi padta.
-   * Gateway se baat na ho paye to chup-chaap aage badh jate hain.
-   */
-  await reconcileByBookingCode(plainCode).catch(() => null);
-
-  const data = await getBookingByCode(plainCode);
-  if (!data) notFound();
-
-  const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
-
-  const [events, extras] = await Promise.all([
-    db
-      .select()
-      .from(bookingEvents)
-      .where(eq(bookingEvents.bookingId, booking.id))
-      .orderBy(bookingEvents.createdAt),
-    getBookingAddons(booking.id),
-  ]);
-
-  const title = pick(lang, puja.titleEn, puja.titleHi);
-  const temple = pick(lang, templeNameEn ?? "", templeNameHi ?? "");
-  const isConfirmed = booking.status !== "PENDING_PAYMENT";
-  const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
-  const paymentPending = sp.pending === "1" && !isConfirmed;
-  const paymentFailed = sp.failed === "1" && !isConfirmed;
-
-  /**
-   * "Details save karein" — user ke tap karte hi WhatsApp khulta hai aur
-   * poori booking admin ke number par chali jati hai. Isse admin ke paas
-   * har booking WhatsApp me bhi save ho jati hai.
-   */
-  const saveDetailsText = [
-    `🪔 ${t.brand} — ${lang === "hi" ? "बुकिंग विवरण" : "Booking details"}`,
-    "",
-    `${lang === "hi" ? "बुकिंग आईडी" : "Booking ID"}: ${booking.bookingCode}`,
-    `${lang === "hi" ? "नाम" : "Name"}: ${booking.devoteeName}`,
-    `${lang === "hi" ? "गोत्र" : "Gotra"}: ${booking.gotra}`,
-    `${lang === "hi" ? "मोबाइल" : "Mobile"}: ${booking.phone}`,
-    ...(booking.memberNames.length
-      ? [`${lang === "hi" ? "सदस्य" : "Members"}: ${booking.memberNames.join(", ")}`]
-      : []),
-    "",
-    `${lang === "hi" ? "पूजा" : "Puja"}: ${title}`,
-    ...(temple ? [`${lang === "hi" ? "मंदिर" : "Temple"}: ${temple}`] : []),
-    `${lang === "hi" ? "पूजा तिथि" : "Puja date"}: ${formatDate(puja.pujaDate, lang)}`,
-    `${lang === "hi" ? "पैकेज" : "Package"}: ${pick(lang, pkg.nameEn, pkg.nameHi)}`,
-    ...(extras.length
-      ? [
-          `${lang === "hi" ? "अतिरिक्त" : "Add-ons"}: ${extras
-            .map((x) => pick(lang, x.nameEn, x.nameHi))
-            .join(", ")}`,
-        ]
-      : []),
-    `${lang === "hi" ? "कुल राशि" : "Total"}: ${formatINR(booking.amountInPaise)}`,
-    ...(booking.addressLine
-      ? [
-          "",
-          `${lang === "hi" ? "पता" : "Address"}: ${[
-            booking.addressLine,
-            booking.city,
-            booking.state,
-            booking.pincode,
-          ]
-            .filter(Boolean)
-            .join(", ")}`,
-        ]
-      : []),
-    ...(booking.sankalp ? ["", `${lang === "hi" ? "संकल्प" : "Sankalp"}: ${booking.sankalp}`] : []),
-  ].join("\n");
-
-  const saveDetailsLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(saveDetailsText)}`;
-
-  return (
-    <div className="container-x max-w-4xl py-10 sm:py-14">
-      {/* -------- Success banner -------- */}
-      <div
-        className={
-          isConfirmed
-            ? "rounded-3xl bg-gradient-to-br from-green-50 to-saffron-50 p-7 text-center ring-1 ring-green-200"
-            : "rounded-3xl bg-amber-50 p-7 text-center ring-1 ring-amber-300"
-        }
-      >
-        <span className="text-5xl">{isConfirmed ? "🪔" : "⏳"}</span>
-        <h1 className="mt-4 text-2xl sm:text-3xl">
-          {isConfirmed
-            ? lang === "hi"
-              ? "आपकी बुकिंग हो गई!"
-              : "Your booking is confirmed!"
-            : lang === "hi"
-              ? "भुगतान अधूरा है"
-              : "Payment incomplete"}
-        </h1>
-        <p className="mx-auto mt-3 max-w-lg text-[15px] leading-relaxed text-ink/70">
-          {isConfirmed
-            ? lang === "hi"
-              ? `पंडित जी संकल्प में ${booking.devoteeName} (${booking.gotra} गोत्र) का नाम लेंगे। सारी अपडेट ${maskPhone(booking.phone)} पर व्हाट्सएप से भेजी जाएँगी।`
-              : `The pandit ji will take the name of ${booking.devoteeName} (${booking.gotra} gotra) in the sankalp. All updates will be sent on WhatsApp to ${maskPhone(booking.phone)}.`
-            : lang === "hi"
-              ? "आपकी बुकिंग सुरक्षित है, लेकिन भुगतान पूरा नहीं हुआ। कृपया दोबारा प्रयास करें या हमें व्हाट्सएप करें।"
-              : "Your booking is saved but payment was not completed. Please try again or message us on WhatsApp."}
-        </p>
-
-        <div className="mt-6 inline-flex flex-col items-center rounded-2xl border-2 border-dashed border-saffron-300 bg-white px-8 py-4">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-ink/50">
-            {t.track.code}
-          </span>
-          <span className="mt-1 font-display text-2xl font-bold tracking-wider text-maroon-800">
-            {booking.bookingCode}
-          </span>
-        </div>
-
-        <p className="mt-3 text-[12px] text-ink/50">
-          {lang === "hi"
-            ? "अपना मोबाइल नंबर डालकर आप कभी भी इस पूजा की स्थिति देख सकते हैं।"
-            : "You can check this puja's status anytime by entering your mobile number."}
-        </p>
-
-        {/* -------- Details WhatsApp par bhejein -------- */}
-        {isConfirmed && (
-          <div className="mx-auto mt-6 max-w-md rounded-2xl border-2 border-dashed border-[#25D366]/40 bg-white/70 p-4">
-            <p className="text-[13.5px] font-bold text-maroon-800">
-              {lang === "hi"
-                ? "📲 अपना विवरण हमें भेज दें"
-                : "📲 Send your details to us"}
-            </p>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-ink/60">
-              {lang === "hi"
-                ? "एक बार दबाइए — व्हाट्सएप खुलेगा और आपकी पूरी बुकिंग हमारे पास पहुँच जाएगी। इससे पंडित जी को आपका नाम, गोत्र और पूजा की तिथि मिल जाएगी।"
-                : "One tap — WhatsApp opens with your full booking ready to send. This gives our pandit ji your name, gotra and puja date."}
-            </p>
-            <a
-              href={saveDetailsLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-big mt-4 bg-[#25D366] text-white hover:brightness-105"
-            >
-              {lang === "hi" ? "व्हाट्सएप पर भेजें" : "Send on WhatsApp"}
-            </a>
-          </div>
-        )}
-      </div>
-
-      {/* Pending ho to page chup-chaap refresh hota rahega — jaise hi
-          Razorpay "paisa mil gaya" kahega, booking apne aap confirm dikhegi */}
-      {!isConfirmed && <PendingPaymentWatcher />}
-
-      {/* -------- Payment ke baad ke messages -------- */}
-      {paymentPending && (
-        <p className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-[14px] leading-relaxed text-amber-900">
-          ⏳{" "}
-          {lang === "hi"
-            ? "भुगतान की पुष्टि हो रही है। बैंक से जवाब आते ही आपकी बुकिंग अपने आप कन्फर्म हो जाएगी — यह पेज थोड़ी देर बाद दोबारा खोलें। पैसा कट गया हो तो चिंता न करें, राशि सुरक्षित है।"
-            : "Your payment is being confirmed. As soon as the bank responds your booking will confirm automatically — reopen this page in a little while. If money was deducted, it is safe."}
-        </p>
-      )}
-
-      {paymentFailed && (
-        <div className="mt-5 rounded-2xl border border-red-300 bg-red-50 px-5 py-4 text-[14px] leading-relaxed text-red-800">
-          <p className="font-bold">
-            {lang === "hi" ? "भुगतान पूरा नहीं हुआ" : "Payment did not go through"}
-          </p>
-          <p className="mt-1">
-            {lang === "hi"
-              ? "आपकी बुकिंग सुरक्षित है। दोबारा प्रयास करें — कोई राशि नहीं कटी है।"
-              : "Your booking is saved. Please try again — no amount has been deducted."}
-          </p>
-          <Link href={`/pujas/${puja.slug}`} className="btn-primary mt-3 px-5 py-2.5">
-            {lang === "hi" ? "दोबारा भुगतान करें" : "Try payment again"}
-          </Link>
-        </div>
-      )}
-
-      {/* -------- Details -------- */}
-      <div className="mt-8 grid gap-6 md:grid-cols-[1fr_1.1fr]">
-        <div className="card overflow-hidden">
-          <PujaImage
-            imageUrl={puja.imageUrl}
-            artKey={puja.artKey}
-            alt={title}
-            width={640}
-            className="aspect-[16/9] w-full"
-          />
-          <div className="p-5">
-            <h2 className="text-base leading-snug">{title}</h2>
-            {temple && (
-              <p className="mt-1.5 text-[12px] font-bold uppercase tracking-wide text-saffron-700">
-                {temple}
-              </p>
-            )}
-
-            <dl className="mt-4 space-y-2.5 text-[13.5px]">
-              {[
-                { k: t.common.date, v: formatDate(puja.pujaDate, lang) },
-                { k: lang === "hi" ? "पैकेज" : "Package", v: pick(lang, pkg.nameEn, pkg.nameHi) },
-                { k: t.booking.name, v: booking.devoteeName },
-                { k: t.booking.gotra, v: booking.gotra },
-                ...(booking.memberNames.length
-                  ? [{ k: t.booking.members, v: booking.memberNames.join(", ") }]
-                  : []),
-                { k: t.booking.total, v: formatINR(booking.amountInPaise) },
-              ].map((row) => (
-                <div key={row.k} className="flex justify-between gap-4 border-b border-saffron-50 pb-2">
-                  <dt className="shrink-0 text-ink/55">{row.k}</dt>
-                  <dd className="text-right font-semibold text-maroon-800">{row.v}</dd>
-                </div>
-              ))}
-            </dl>
-
-            {extras.length > 0 && (
-              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
-                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
-                  {lang === "hi" ? "अतिरिक्त सामान / सेवा" : "Extra items & seva"}
-                </p>
-                <ul className="mt-2 space-y-1.5">
-                  {extras.map((x) => (
-                    <li key={x.id} className="flex justify-between gap-3 text-[13px]">
-                      <span className="text-ink/70">
-                        {x.kind === "DELIVERY" ? "📦" : "🪔"}{" "}
-                        {pick(lang, x.nameEn, x.nameHi)}
-                      </span>
-                      <span className="shrink-0 font-semibold text-maroon-800">
-                        {formatINR(x.priceInPaise)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {booking.sankalp && (
-              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
-                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
-                  {t.booking.sankalp}
-                </p>
-                <p className="mt-1 text-[13px] leading-relaxed text-ink/70">
-                  {booking.sankalp}
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div>
-          <BookingTimeline lang={lang} status={booking.status} events={events} />
-
-          {booking.videoUrl && (
-            <a
-              href={booking.videoUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-primary mt-5 w-full py-3"
-            >
-              🎬 {lang === "hi" ? "पूजा वीडियो देखें" : "Watch Puja Video"}
-            </a>
-          )}
-
-          {booking.prasadTracking && (
-            <p className="mt-4 rounded-xl border border-saffron-200 bg-white px-4 py-3 text-[13px]">
-              📦 {lang === "hi" ? "प्रसाद ट्रैकिंग" : "Prasad tracking"}:{" "}
-              <span className="font-bold text-maroon-800">{booking.prasadTracking}</span>
-            </p>
-          )}
-
-          <div className="mt-5 flex flex-wrap gap-3">
-            <a
-              href={`https://wa.me/${waNumber}?text=${encodeURIComponent(
-                `Booking ${booking.bookingCode}`,
-              )}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn rounded-full bg-[#25D366] px-5 py-2.5 text-sm font-bold text-white hover:brightness-105"
-            >
-              {t.cta.talkToUs}
-            </a>
-            <Link href="/pujas" className="btn-secondary">
-              {t.cta.viewAll}
-            </Link>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+<file path="package.json">
+{
+  "name": "pooja-path",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed.ts",
+    "db:generate": "npx drizzle-kit@0.31.10 generate",
+    "test:reconcile": "tsx scripts/test-reconcile.mts",
+    "render-build": "npm run db:migrate && npm run db:seed && next build",
+    "test:payment-flow": "tsx scripts/test-payment-flow.mts"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "drizzle-orm": "^0.45.2",
+    "jose": "^6.0.12",
+    "next": "16.3.0",
+    "pg": "^8.16.3",
+    "razorpay": "^2.9.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "server-only": "^0.0.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.6",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22",
+    "@types/pg": "^8.15.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
 }
 </file>
 
@@ -16375,6 +16514,370 @@ export const adminBookingUpdateSchema = z.object({
 export function firstError(err: z.ZodError): string {
   const issue = err.issues[0];
   return issue?.message || "Form me kuch galat hai";
+}
+</file>
+
+<file path="src/app/(site)/booking/[code]/page.tsx">
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { eq, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { bookingEvents, bookings } from "@/db/schema";
+import PujaImage from "@/components/PujaImage";
+import BookingTimeline from "@/components/BookingTimeline";
+import PendingPaymentWatcher from "@/components/PendingPaymentWatcher";
+import PaidWhatsappRedirect from "@/components/PaidWhatsappRedirect";
+import { reconcileByBookingCode } from "@/lib/payments/reconcile";
+import { getLangDict } from "@/lib/lang-server";
+import { pick } from "@/lib/i18n";
+import { formatDate, formatINR, maskPhone } from "@/lib/utils";
+import { siteConfig } from "@/lib/env";
+import { getBookingAddons, getBookingByCode } from "@/lib/queries";
+
+export const metadata: Metadata = {
+  title: "Booking Status",
+  robots: { index: false, follow: false },
+};
+
+type Params = Promise<{ code: string }>;
+type Search = Promise<{
+  paid?: string;
+  pending?: string;
+  failed?: string;
+  wa?: string;
+}>;
+
+export default async function BookingStatusPage({
+  params,
+  searchParams,
+}: {
+  params: Params;
+  searchParams: Search;
+}) {
+  const { code } = await params;
+  const sp = await searchParams;
+  const { lang, t } = await getLangDict();
+
+  const plainCode = decodeURIComponent(code);
+
+  /**
+   * Page khulte hi gateway se poochh lo ki paisa aaya ya nahi.
+   *
+   * Callback ya webhook chuk bhi jaye to booking yahin apne aap confirm
+   * ho jati hai — user ko "payment pending" dekh kar ghabrana nahi padta.
+   * Gateway se baat na ho paye to chup-chaap aage badh jate hain.
+   */
+  await reconcileByBookingCode(plainCode).catch(() => null);
+
+  const data = await getBookingByCode(plainCode);
+  if (!data) notFound();
+
+  const { booking, puja, pkg, templeNameEn, templeNameHi } = data;
+
+  const [events, extras, [freshRow]] = await Promise.all([
+    db
+      .select()
+      .from(bookingEvents)
+      .where(eq(bookingEvents.bookingId, booking.id))
+      .orderBy(bookingEvents.createdAt),
+    getBookingAddons(booking.id),
+    // "Abhi-abhi confirm hui?" — samay ka hisaab database karta hai,
+    // taaki page ka render pure rahe (React ki shart).
+    db
+      .select({
+        fresh: sql<boolean>`${bookings.updatedAt} > now() - interval '5 minutes'`,
+      })
+      .from(bookings)
+      .where(eq(bookings.id, booking.id))
+      .limit(1),
+  ]);
+
+  const title = pick(lang, puja.titleEn, puja.titleHi);
+  const temple = pick(lang, templeNameEn ?? "", templeNameHi ?? "");
+  const isConfirmed = booking.status !== "PENDING_PAYMENT";
+  const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
+  const paymentPending = sp.pending === "1" && !isConfirmed;
+  const paymentFailed = sp.failed === "1" && !isConfirmed;
+
+  /**
+   * Abhi-abhi payment karke aaye hain? To WhatsApp apne aap khul jayega.
+   *
+   * Do halaat me khulta hai:
+   *   • Razorpay ka callback `?paid=1` lagakar bhejta hai, ya
+   *   • booking pichhle 5 minute me confirm hui ho (callback toot gaya
+   *     ho aur reconcile ne abhi confirm ki ho — tab bhi grahak payment
+   *     karke hi aaya hoga)
+   *
+   * Ek baar chalne ke baad URL me `wa=done` lag jata hai, isliye refresh
+   * ya back dabane par dobara nahi khulta.
+   */
+  const openWhatsapp =
+    isConfirmed &&
+    sp.wa !== "done" &&
+    (sp.paid === "1" || Boolean(freshRow?.fresh));
+
+  /**
+   * "Details save karein" — user ke tap karte hi WhatsApp khulta hai aur
+   * poori booking admin ke number par chali jati hai. Isse admin ke paas
+   * har booking WhatsApp me bhi save ho jati hai.
+   */
+  const saveDetailsText = [
+    `🪔 ${t.brand} — ${lang === "hi" ? "बुकिंग विवरण" : "Booking details"}`,
+    "",
+    `${lang === "hi" ? "बुकिंग आईडी" : "Booking ID"}: ${booking.bookingCode}`,
+    `${lang === "hi" ? "नाम" : "Name"}: ${booking.devoteeName}`,
+    `${lang === "hi" ? "गोत्र" : "Gotra"}: ${booking.gotra}`,
+    `${lang === "hi" ? "मोबाइल" : "Mobile"}: ${booking.phone}`,
+    ...(booking.memberNames.length
+      ? [`${lang === "hi" ? "सदस्य" : "Members"}: ${booking.memberNames.join(", ")}`]
+      : []),
+    "",
+    `${lang === "hi" ? "पूजा" : "Puja"}: ${title}`,
+    ...(temple ? [`${lang === "hi" ? "मंदिर" : "Temple"}: ${temple}`] : []),
+    `${lang === "hi" ? "पूजा तिथि" : "Puja date"}: ${formatDate(puja.pujaDate, lang)}`,
+    `${lang === "hi" ? "पैकेज" : "Package"}: ${pick(lang, pkg.nameEn, pkg.nameHi)}`,
+    ...(extras.length
+      ? [
+          `${lang === "hi" ? "अतिरिक्त" : "Add-ons"}: ${extras
+            .map((x) => pick(lang, x.nameEn, x.nameHi))
+            .join(", ")}`,
+        ]
+      : []),
+    `${lang === "hi" ? "कुल राशि" : "Total"}: ${formatINR(booking.amountInPaise)}`,
+    ...(booking.addressLine
+      ? [
+          "",
+          `${lang === "hi" ? "पता" : "Address"}: ${[
+            booking.addressLine,
+            booking.city,
+            booking.state,
+            booking.pincode,
+          ]
+            .filter(Boolean)
+            .join(", ")}`,
+        ]
+      : []),
+    ...(booking.sankalp ? ["", `${lang === "hi" ? "संकल्प" : "Sankalp"}: ${booking.sankalp}`] : []),
+  ].join("\n");
+
+  const saveDetailsLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(saveDetailsText)}`;
+
+  return (
+    <div className="container-x max-w-4xl py-10 sm:py-14">
+      {/* -------- Success banner -------- */}
+      <div
+        className={
+          isConfirmed
+            ? "rounded-3xl bg-gradient-to-br from-green-50 to-saffron-50 p-7 text-center ring-1 ring-green-200"
+            : "rounded-3xl bg-amber-50 p-7 text-center ring-1 ring-amber-300"
+        }
+      >
+        <span className="text-5xl">{isConfirmed ? "🪔" : "⏳"}</span>
+        <h1 className="mt-4 text-2xl sm:text-3xl">
+          {isConfirmed
+            ? lang === "hi"
+              ? "आपकी बुकिंग हो गई!"
+              : "Your booking is confirmed!"
+            : lang === "hi"
+              ? "भुगतान अधूरा है"
+              : "Payment incomplete"}
+        </h1>
+        <p className="mx-auto mt-3 max-w-lg text-[15px] leading-relaxed text-ink/70">
+          {isConfirmed
+            ? lang === "hi"
+              ? `पंडित जी संकल्प में ${booking.devoteeName} (${booking.gotra} गोत्र) का नाम लेंगे। सारी अपडेट ${maskPhone(booking.phone)} पर व्हाट्सएप से भेजी जाएँगी।`
+              : `The pandit ji will take the name of ${booking.devoteeName} (${booking.gotra} gotra) in the sankalp. All updates will be sent on WhatsApp to ${maskPhone(booking.phone)}.`
+            : lang === "hi"
+              ? "आपकी बुकिंग सुरक्षित है, लेकिन भुगतान पूरा नहीं हुआ। कृपया दोबारा प्रयास करें या हमें व्हाट्सएप करें।"
+              : "Your booking is saved but payment was not completed. Please try again or message us on WhatsApp."}
+        </p>
+
+        <div className="mt-6 inline-flex flex-col items-center rounded-2xl border-2 border-dashed border-saffron-300 bg-white px-8 py-4">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-ink/50">
+            {t.track.code}
+          </span>
+          <span className="mt-1 font-display text-2xl font-bold tracking-wider text-maroon-800">
+            {booking.bookingCode}
+          </span>
+        </div>
+
+        <p className="mt-3 text-[12px] text-ink/50">
+          {lang === "hi"
+            ? "अपना मोबाइल नंबर डालकर आप कभी भी इस पूजा की स्थिति देख सकते हैं।"
+            : "You can check this puja's status anytime by entering your mobile number."}
+        </p>
+
+        {/* -------- Details WhatsApp par bhejein -------- */}
+        {isConfirmed && (
+          <div className="mx-auto mt-6 max-w-md rounded-2xl border-2 border-dashed border-[#25D366]/40 bg-white/70 p-4">
+            <p className="text-[13.5px] font-bold text-maroon-800">
+              {lang === "hi"
+                ? "📲 अपना विवरण हमें भेज दें"
+                : "📲 Send your details to us"}
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-ink/60">
+              {lang === "hi"
+                ? "एक बार दबाइए — व्हाट्सएप खुलेगा और आपकी पूरी बुकिंग हमारे पास पहुँच जाएगी। इससे पंडित जी को आपका नाम, गोत्र और पूजा की तिथि मिल जाएगी।"
+                : "One tap — WhatsApp opens with your full booking ready to send. This gives our pandit ji your name, gotra and puja date."}
+            </p>
+            <a
+              href={saveDetailsLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-big mt-4 bg-[#25D366] text-white hover:brightness-105"
+            >
+              {lang === "hi" ? "व्हाट्सएप पर भेजें" : "Send on WhatsApp"}
+            </a>
+          </div>
+        )}
+      </div>
+
+      {/* Payment karke abhi aaye hain — WhatsApp apne aap khol dete hain */}
+      {openWhatsapp && (
+        <PaidWhatsappRedirect link={saveDetailsLink} hi={lang === "hi"} />
+      )}
+
+      {/* Pending ho to page chup-chaap refresh hota rahega — jaise hi
+          Razorpay "paisa mil gaya" kahega, booking apne aap confirm dikhegi */}
+      {!isConfirmed && <PendingPaymentWatcher />}
+
+      {/* -------- Payment ke baad ke messages -------- */}
+      {paymentPending && (
+        <p className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 text-[14px] leading-relaxed text-amber-900">
+          ⏳{" "}
+          {lang === "hi"
+            ? "भुगतान की पुष्टि हो रही है। बैंक से जवाब आते ही आपकी बुकिंग अपने आप कन्फर्म हो जाएगी — यह पेज थोड़ी देर बाद दोबारा खोलें। पैसा कट गया हो तो चिंता न करें, राशि सुरक्षित है।"
+            : "Your payment is being confirmed. As soon as the bank responds your booking will confirm automatically — reopen this page in a little while. If money was deducted, it is safe."}
+        </p>
+      )}
+
+      {paymentFailed && (
+        <div className="mt-5 rounded-2xl border border-red-300 bg-red-50 px-5 py-4 text-[14px] leading-relaxed text-red-800">
+          <p className="font-bold">
+            {lang === "hi" ? "भुगतान पूरा नहीं हुआ" : "Payment did not go through"}
+          </p>
+          <p className="mt-1">
+            {lang === "hi"
+              ? "आपकी बुकिंग सुरक्षित है। दोबारा प्रयास करें — कोई राशि नहीं कटी है।"
+              : "Your booking is saved. Please try again — no amount has been deducted."}
+          </p>
+          <Link href={`/pujas/${puja.slug}`} className="btn-primary mt-3 px-5 py-2.5">
+            {lang === "hi" ? "दोबारा भुगतान करें" : "Try payment again"}
+          </Link>
+        </div>
+      )}
+
+      {/* -------- Details -------- */}
+      <div className="mt-8 grid gap-6 md:grid-cols-[1fr_1.1fr]">
+        <div className="card overflow-hidden">
+          <PujaImage
+            imageUrl={puja.imageUrl}
+            artKey={puja.artKey}
+            alt={title}
+            width={640}
+            className="aspect-[16/9] w-full"
+          />
+          <div className="p-5">
+            <h2 className="text-base leading-snug">{title}</h2>
+            {temple && (
+              <p className="mt-1.5 text-[12px] font-bold uppercase tracking-wide text-saffron-700">
+                {temple}
+              </p>
+            )}
+
+            <dl className="mt-4 space-y-2.5 text-[13.5px]">
+              {[
+                { k: t.common.date, v: formatDate(puja.pujaDate, lang) },
+                { k: lang === "hi" ? "पैकेज" : "Package", v: pick(lang, pkg.nameEn, pkg.nameHi) },
+                { k: t.booking.name, v: booking.devoteeName },
+                { k: t.booking.gotra, v: booking.gotra },
+                ...(booking.memberNames.length
+                  ? [{ k: t.booking.members, v: booking.memberNames.join(", ") }]
+                  : []),
+                { k: t.booking.total, v: formatINR(booking.amountInPaise) },
+              ].map((row) => (
+                <div key={row.k} className="flex justify-between gap-4 border-b border-saffron-50 pb-2">
+                  <dt className="shrink-0 text-ink/55">{row.k}</dt>
+                  <dd className="text-right font-semibold text-maroon-800">{row.v}</dd>
+                </div>
+              ))}
+            </dl>
+
+            {extras.length > 0 && (
+              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
+                  {lang === "hi" ? "अतिरिक्त सामान / सेवा" : "Extra items & seva"}
+                </p>
+                <ul className="mt-2 space-y-1.5">
+                  {extras.map((x) => (
+                    <li key={x.id} className="flex justify-between gap-3 text-[13px]">
+                      <span className="text-ink/70">
+                        {x.kind === "DELIVERY" ? "📦" : "🪔"}{" "}
+                        {pick(lang, x.nameEn, x.nameHi)}
+                      </span>
+                      <span className="shrink-0 font-semibold text-maroon-800">
+                        {formatINR(x.priceInPaise)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {booking.sankalp && (
+              <div className="mt-4 rounded-xl bg-saffron-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-saffron-700">
+                  {t.booking.sankalp}
+                </p>
+                <p className="mt-1 text-[13px] leading-relaxed text-ink/70">
+                  {booking.sankalp}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <BookingTimeline lang={lang} status={booking.status} events={events} />
+
+          {booking.videoUrl && (
+            <a
+              href={booking.videoUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-primary mt-5 w-full py-3"
+            >
+              🎬 {lang === "hi" ? "पूजा वीडियो देखें" : "Watch Puja Video"}
+            </a>
+          )}
+
+          {booking.prasadTracking && (
+            <p className="mt-4 rounded-xl border border-saffron-200 bg-white px-4 py-3 text-[13px]">
+              📦 {lang === "hi" ? "प्रसाद ट्रैकिंग" : "Prasad tracking"}:{" "}
+              <span className="font-bold text-maroon-800">{booking.prasadTracking}</span>
+            </p>
+          )}
+
+          <div className="mt-5 flex flex-wrap gap-3">
+            <a
+              href={`https://wa.me/${waNumber}?text=${encodeURIComponent(
+                `Booking ${booking.bookingCode}`,
+              )}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn rounded-full bg-[#25D366] px-5 py-2.5 text-sm font-bold text-white hover:brightness-105"
+            >
+              {t.cta.talkToUs}
+            </a>
+            <Link href="/pujas" className="btn-secondary">
+              {t.cta.viewAll}
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 </file>
 
