@@ -210,13 +210,25 @@ RAZORPAY_WEBHOOK_SECRET = webhook wala secret
 
 Ye sabse zaroori hissa hai — ek baar dhyaan se padh lein.
 
-Booking confirm hone ke **teen** raaste hain. Pehle do toot sakte hain, teesra hamesha chalta hai:
+Booking confirm hone ke **chaar** raaste hain. Shuru ke do toot sakte hain, baaki do hamesha chalte hain:
 
 | # | Raasta | Kab toot jata hai |
 |---|---|---|
-| 1 | **Browser callback** — payment ke baad Razorpay user ko `/api/payment/razorpay/callback` par bhejta hai | Mobile par UPI app (GPay/PhonePe) khulne ke baad log wapas browser me nahi aate. Tab callback chalta hi nahi. Naye Razorpay account me domain whitelist na ho to bhi nahi chalta. |
+| 1 | **Browser callback** — Razorpay khud user ko `/api/payment/razorpay/callback` par bhejta hai | **Ye tabhi chalta hai jab aapka domain Razorpay account me "Website and app details" me darj ho.** Darj na ho to Razorpay chup-chaap payment window band kar deta hai — paisa kat jata hai aur website ko khabar hi nahi hoti. Isi wajah se ye raasta ab checkout me maanga hi nahi jata (route mojood hai, domain darj karwate hi apne aap kaam karega). |
 | 2 | **Webhook** — Razorpay khud humare server ko batata hai | Dashboard me webhook register na kiya ho, ya `RAZORPAY_WEBHOOK_SECRET` match na kare |
-| 3 | **Reconcile** — hum khud Razorpay se poochhte hain | Kabhi nahi — jab bhi koi pending booking khulti hai, ye apne aap chalta hai |
+| 3 | **Checkout handler** — payment poora hote hi browser khud `/api/payment/verify` par bata deta hai | Sirf tab jab browser tab hi band ho jaye (mobile par UPI app se wapas hi na aayein) |
+| 4 | **Reconcile** — hum khud Razorpay se poochhte hain | Kabhi nahi — jab bhi koi pending booking khulti hai, ye apne aap chalta hai |
+
+**Raasta 3 aur 4 milkar "kuch hua hi nahi" wali dikkat khatam kar dete hain.**
+Payment window band hote hi browser har kuch second me
+`/api/bookings/status?code=PP-...` poochhta rehta hai (~30 second tak), aur wo
+route har baar Razorpay se seedha confirm karta hai. Paisa milte hi browser
+khud booking page khol deta hai — aur wahan WhatsApp apne aap khul jata hai.
+Booking code `sessionStorage` me bhi rakha jata hai, isliye UPI app se wapas
+aane par page dobara load ho jaye tab bhi jaanch chalti rehti hai.
+
+> Screen par "⏳ आपका भुगतान जाँचा जा रहा है…" dikhe to yahi chal raha hai.
+> Agar sach me payment nahi kiya to "मैंने भुगतान नहीं किया" daba dein.
 
 **Raasta 3 (reconcile) apne aap in teen jagah chalta hai:**
 
