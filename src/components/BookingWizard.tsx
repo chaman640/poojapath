@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useLang } from "./LanguageProvider";
 import { pick } from "@/lib/i18n";
 import { cn, formatINR, optimizedImage } from "@/lib/utils";
+import { watchForPayment, type PayState } from "@/lib/payment-watch";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -126,14 +127,9 @@ function clearPending() {
 }
 
 /**
- * Server ka jawab:
- *   paid    → paisa aa gaya
- *   pending → koshish chal rahi hai / abhi pata nahi → intezaar karo
- *   none    → gateway par ek bhi koshish nahi → sach me payment nahi hua
- *   failed  → bank ne mana kar diya
+ * Server se ek baar poochho. Jawab ke chaar hi roop hote hain —
+ * `paid`, `pending`, `none`, `failed` (dekhein `@/lib/payment-watch`).
  */
-type PayState = "paid" | "pending" | "none" | "failed";
-
 async function askServer(code: string): Promise<PayState> {
   try {
     const res = await fetch(`/api/bookings/status?code=${encodeURIComponent(code)}`, {
@@ -152,44 +148,29 @@ async function askServer(code: string): Promise<PayState> {
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Har 5 second par ek jaanch — grahak ke saamne loading isi hisaab se chalti hai */
+const GAP_MS = 5_000;
 
 /**
- * Paisa aane ka intezaar — par andha intezaar nahi.
- *
- * UPI ka jawab aane me 30 se 90 second tak lag jate hain. Isliye jab tak
- * Razorpay keh raha hai ki koshish chal rahi hai, hum poore `patientTries`
- * tak rukte hain. Lekin agar Razorpay saaf keh de ki "is order par ek bhi
- * koshish darj nahi hai" (matlab user ne bas window band ki thi), to lagatar
- * teen aise jawab ke baad hi haath khada kar dete hain — bekaar me 2 minute
- * "jaanch rahe hain" nahi dikhate.
+ * Intezaar ka poora niyam `@/lib/payment-watch` me hai (wahin uske test bhi
+ * hain). Yahan bas usse browser ki cheezein — fetch aur timer — jod dete hain.
  */
-async function waitForPaid(
+function waitForPaid(
   code: string,
   alive: () => boolean,
-  patientTries: number,
+  o: { minChecks: number; maxChecks: number; onTick?: (n: number) => void },
 ): Promise<PayState> {
-  const gaps = [0, 2000, 2500, 3000, 4000, 5000, 5000, 6000, 6000, 7000, 7000, 8000];
-  let emptyInARow = 0;
-
-  for (let i = 0; i < patientTries; i++) {
-    if (!alive()) return "pending";
-    const gap = gaps[Math.min(i, gaps.length - 1)];
-    if (gap) await sleep(gap);
-    if (!alive()) return "pending";
-
-    const state = await askServer(code);
-    if (state === "paid") return "paid";
-    if (state === "failed") return "failed";
-
-    if (state === "none") {
-      emptyInARow++;
-      if (emptyInARow >= 3) return "none";
-    } else {
-      emptyInARow = 0;
-    }
-  }
-  return "pending";
+  return watchForPayment({
+    minChecks: o.minChecks,
+    maxChecks: o.maxChecks,
+    gapMs: GAP_MS,
+    ask: () => askServer(code),
+    wait: sleep,
+    alive,
+    onTick: o.onTick,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -276,6 +257,7 @@ export default function BookingWizard({
 
   /* ---- payment ka peechha ---- */
   const [checking, setChecking] = useState(false);
+  const [tick, setTick] = useState(0);
   const [lastCode, setLastCode] = useState("");
   const watchRef = useRef(false);
 
@@ -291,15 +273,20 @@ export default function BookingWizard({
    * Paisa mila to booking page (aur wahan se WhatsApp), warna saaf saaf
    * bata do ki payment nahi hua aur dobara koshish kar sakte hain.
    */
-  async function watchPayment(code: string, patientTries: number) {
+  async function watchPayment(code: string, minChecks: number, maxChecks: number) {
     if (watchRef.current) return;
     watchRef.current = true;
     setLastCode(code);
     setError("");
+    setTick(0);
     setChecking(true);
     setBusy(true);
 
-    const state = await waitForPaid(code, () => watchRef.current, patientTries);
+    const state = await waitForPaid(code, () => watchRef.current, {
+      minChecks,
+      maxChecks,
+      onTick: (n) => setTick(n),
+    });
 
     if (state === "paid") {
       goToBooking(code, true);
@@ -328,12 +315,13 @@ export default function BookingWizard({
       return;
     }
 
-    // pending — paisa raaste me ho sakta hai. Jhooth mat bolo.
-    setError(
-      lang === "hi"
-        ? "बैंक का जवाब अभी तक नहीं आया। अगर पैसे कट गए हैं तो चिंता न करें — पहुँचते ही बुकिंग अपने आप कन्फर्म हो जाएगी। नीचे 'बुकिंग देखें' दबाकर देखते रहें।"
-        : "The bank hasn't responded yet. If money was deducted, don't worry — the booking confirms itself the moment it lands. Tap 'View booking' below to keep watching.",
-    );
+    /**
+     * pending — bank ka jawab abhi tak nahi aaya, par paisa raaste me ho
+     * sakta hai. Yahan grahak ko "fail" bilkul nahi bolna. Booking page par
+     * bhej dete hain: wahan jaanch apne aap chalti rehti hai (har 6 second),
+     * aur paisa pahunchte hi booking confirm hokar WhatsApp khul jata hai.
+     */
+    goToBooking(code, false);
   }
 
   /**
@@ -346,7 +334,7 @@ export default function BookingWizard({
 
     let alive = true;
     void (async () => {
-      const state = await waitForPaid(saved, () => alive, 14);
+      const state = await waitForPaid(saved, () => alive, { minChecks: 4, maxChecks: 10 });
       if (!alive) return;
       if (state === "paid") goToBooking(saved, true);
       else clearPending();
@@ -592,7 +580,7 @@ export default function BookingWizard({
             }
             // Verify na ho paya — par paisa kat chuka ho sakta hai.
             // Server se poochhte raho, wo Razorpay se seedha confirm karega.
-            void watchPayment(code, 26);
+            void watchPayment(code, 6, 36);
           })();
         },
 
@@ -614,7 +602,7 @@ export default function BookingWizard({
           // Window band hui — turant "cancelled" mat bolo. Ho sakta hai
           // paisa UPI app se ja chuka ho. Pehle server se poochh lo.
           ondismiss: () => {
-            void watchPayment(code, 24);
+            void watchPayment(code, 6, 30);
           },
         },
       });
@@ -1063,31 +1051,50 @@ export default function BookingWizard({
         </div>
       )}
 
-      {/* ---------- Payment ki jaanch chal rahi hai ---------- */}
+      {/* ---------- Payment ki jaanch chal rahi hai ---------- *
+        * Poori screen par — taaki grahak galti se doosri payment shuru na
+        * kar de, aur use saaf dikhe ki hum abhi bhi jaanch rahe hain.       */}
       {checking && (
         <div
           role="status"
-          className="mt-5 rounded-2xl border-2 border-saffron-300 bg-saffron-50 px-4 py-3.5 text-center"
+          aria-live="polite"
+          className="fixed inset-0 z-[60] grid place-items-center bg-ink/60 px-6 backdrop-blur-sm"
         >
-          <p className="text-[14.5px] font-bold text-maroon-800">
-            {lang === "hi"
-              ? "⏳ आपका भुगतान जाँचा जा रहा है…"
-              : "⏳ Checking your payment…"}
-          </p>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink/65">
-            {lang === "hi"
-              ? "कृपया यह पेज बंद न करें। UPI में कभी-कभी एक मिनट तक लग जाता है — पैसे पहुँचते ही बुकिंग अपने आप खुल जाएगी।"
-              : "Please don't close this page. UPI can take up to a minute — your booking will open the moment the payment lands."}
-          </p>
-          <button
-            type="button"
-            onClick={() => {
-              watchRef.current = false;
-            }}
-            className="mt-2.5 text-[12.5px] font-semibold text-maroon-700 underline underline-offset-2"
-          >
-            {lang === "hi" ? "मैंने भुगतान नहीं किया" : "I didn't pay"}
-          </button>
+          <div className="w-full max-w-sm rounded-3xl bg-white p-7 text-center shadow-2xl">
+            <div className="mx-auto h-14 w-14 animate-spin rounded-full border-4 border-saffron-200 border-t-saffron-600" />
+
+            <p className="mt-5 text-[17px] font-bold text-maroon-800">
+              {lang === "hi" ? "भुगतान की पुष्टि हो रही है…" : "Confirming your payment…"}
+            </p>
+
+            <p className="mt-2 text-[13.5px] leading-relaxed text-ink/65">
+              {lang === "hi"
+                ? "कृपया प्रतीक्षा करें और यह पेज बंद न करें। UPI का जवाब आने में एक मिनट तक लग सकता है।"
+                : "Please wait and don't close this page. UPI can take up to a minute to respond."}
+            </p>
+
+            {tick > 0 && (
+              <p className="mt-3 text-[12.5px] font-bold tracking-wide text-saffron-700">
+                {lang === "hi" ? `जाँच ${tick}` : `Check ${tick}`}
+              </p>
+            )}
+
+            <p className="mt-4 rounded-xl bg-saffron-50 px-3 py-2 text-[12px] leading-relaxed text-ink/60">
+              {lang === "hi"
+                ? "अगर पैसे कट गए हैं तो बुकिंग पक्की हो जाएगी — चिंता न करें।"
+                : "If money has been deducted, your booking will be confirmed — don't worry."}
+            </p>
+
+            <button
+              type="button"
+              onClick={() => {
+                watchRef.current = false;
+              }}
+              className="mt-4 text-[12.5px] font-semibold text-ink/50 underline underline-offset-2"
+            >
+              {lang === "hi" ? "मैंने भुगतान नहीं किया" : "I didn't pay"}
+            </button>
+          </div>
         </div>
       )}
 

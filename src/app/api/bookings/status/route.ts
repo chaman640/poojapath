@@ -62,12 +62,14 @@ export async function GET(req: Request) {
   /**
    * Gateway se seedha poochho — callback/webhook chuk gaya ho to yahin pakda jayega.
    *
-   * Throttle sirf 4 second ka, 15 ka nahi: grahak saamne baitha intezaar kar
-   * raha hai aur UPI ka jawab 30-60 second bhi le leta hai. 15 second wale
-   * throttle me poore intezaar me sirf do baar hi Razorpay tak baat pahunchti
-   * thi — isi wajah se dheere aane wale UPI payment "fail" dikh jate the.
+   * Throttle sirf 3 second ka, 15 ka nahi: grahak saamne baitha intezaar kar
+   * raha hai aur UPI ka jawab 30-60 second bhi le leta hai. Browser har 5
+   * second par poochhta hai, isliye 3 second ka throttle rakha hai — har
+   * poochh sach me Razorpay tak pahunchti hai. 15 second wale throttle me
+   * poore intezaar me do-teen baar hi baat pahunchti thi, aur isi wajah se
+   * dheere aane wale UPI payment "fail" dikh jate the.
    */
-  const report = await reconcileByBookingCode(code, { throttleMs: 4_000 }).catch(() => null);
+  const report = await reconcileByBookingCode(code, { throttleMs: 3_000 }).catch(() => null);
 
   const [row] = await db
     .select({ status: bookings.status })
