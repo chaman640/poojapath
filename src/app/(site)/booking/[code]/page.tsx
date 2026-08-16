@@ -6,8 +6,8 @@ import { db } from "@/db";
 import { bookingEvents, bookings } from "@/db/schema";
 import PujaImage from "@/components/PujaImage";
 import BookingTimeline from "@/components/BookingTimeline";
-import PendingPaymentWatcher from "@/components/PendingPaymentWatcher";
-import PaidWhatsappRedirect from "@/components/PaidWhatsappRedirect";
+import BookingPendingWatch from "@/components/BookingPendingWatch";
+import BookingWhatsapp from "@/components/BookingWhatsapp";
 import { reconcileByBookingCode } from "@/lib/payments/reconcile";
 import { getLangDict } from "@/lib/lang-server";
 import { pick } from "@/lib/i18n";
@@ -215,12 +215,12 @@ export default async function BookingStatusPage({
 
       {/* Payment karke abhi aaye hain — WhatsApp apne aap khol dete hain */}
       {openWhatsapp && (
-        <PaidWhatsappRedirect link={saveDetailsLink} hi={lang === "hi"} />
+        <BookingWhatsapp link={saveDetailsLink} hi={lang === "hi"} />
       )}
 
       {/* Pending ho to page chup-chaap refresh hota rahega — jaise hi
           Razorpay "paisa mil gaya" kahega, booking apne aap confirm dikhegi */}
-      {!isConfirmed && <PendingPaymentWatcher />}
+      {!isConfirmed && <BookingPendingWatch />}
 
       {/* -------- Payment ke baad ke messages -------- */}
       {paymentPending && (

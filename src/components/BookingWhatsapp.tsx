@@ -5,22 +5,20 @@ import { useEffect, useState } from "react";
 /**
  * Payment ke turant baad WhatsApp khol dena.
  *
- * Booking confirm hote hi ye ek chhota sa countdown dikhata hai aur phir
- * WhatsApp khol deta hai — message me poori booking (ID, naam, gotra,
- * number, puja, tithi, raashi) pehle se bhari hoti hai. Grahak ko bas
- * "send" dabana hota hai, aur aapke paas har booking WhatsApp me aa jati hai.
+ * Message me poori booking pehle se bhari hoti hai — booking ID, naam,
+ * gotra, number, puja, tithi, raashi. Grahak ko bas "send" dabana hota
+ * hai, aur aapke paas har booking WhatsApp me aa jati hai.
  *
  * Teen baatein jaan-boojh kar rakhi gayi hain:
  *
  *  1. **Sirf abhi wali booking par** — purani booking dobara kholne par
- *     WhatsApp nahi khulta. Ye faisla server par hota hai: ya to Razorpay
- *     `?paid=1` lagakar bheje, ya booking pichhle 5 minute me confirm hui ho.
- *  2. **Rok sakte hain** — countdown ke saath "Rehne dein" bhi hai. Kisi ko
- *     zabardasti doosri app me nahi bhejte.
- *  3. **Dobara nahi khulega** — chalte hi URL me `wa=done` laga dete hain,
- *     isliye back dabane ya refresh karne par ye phir se nahi chalega.
+ *     WhatsApp nahi khulta. Ye faisla server par hota hai: ya to URL me
+ *     `?paid=1` ho, ya booking pichhle 5 minute me confirm hui ho.
+ *  2. **Rok sakte hain** — countdown ke saath "Rehne dein" bhi hai.
+ *  3. **Dobara nahi khulega** — chalte hi URL me `wa=done` lag jata hai,
+ *     isliye refresh ya back dabane par phir se nahi chalega.
  */
-export default function PaidWhatsappRedirect({
+export default function BookingWhatsapp({
   link,
   seconds = 3,
   hi,

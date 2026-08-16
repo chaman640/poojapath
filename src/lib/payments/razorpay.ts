@@ -25,6 +25,14 @@ function getClient(): Razorpay {
   return client;
 }
 
+/**
+ * Public Key ID — browser me jaana surakshit hai (Key Secret kabhi nahi).
+ * Purane order ko dobara kholte waqt iski zaroorat padti hai.
+ */
+export function publicKeyId(): string {
+  return process.env.RAZORPAY_KEY_ID?.trim() ?? "";
+}
+
 export type CreatedOrder = {
   orderId: string;
   amount: number;

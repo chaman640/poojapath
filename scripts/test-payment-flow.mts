@@ -89,7 +89,7 @@ const { eq } = await import("drizzle-orm");
 const callback = await import("../src/app/api/payment/razorpay/callback/route");
 const webhook = await import("../src/app/api/payment/webhook/route");
 const verify = await import("../src/app/api/payment/verify/route");
-const status = await import("../src/app/api/bookings/status/route");
+const status = await import("../src/app/api/payment/status/route");
 
 let pass = 0;
 let fail = 0;
@@ -375,7 +375,7 @@ console.log("\n🧪 Payment ke baad ka poora raasta\n");
 
 function statusRequest(code: string) {
   return new Request(
-    `https://anusthanpooja.site/api/bookings/status?code=${encodeURIComponent(code)}`,
+    `https://anusthanpooja.site/api/payment/status?code=${encodeURIComponent(code)}`,
     { headers: { host: "anusthanpooja.site" } },
   );
 }
@@ -404,7 +404,7 @@ function verifyRequest(body: Record<string, string>) {
 
   // Na callback, na webhook — sirf browser ka sawaal
   const res = await status.GET(statusRequest(b.bookingCode));
-  const json = (await res.json()) as { ok?: boolean; paid?: boolean; status?: string };
+  const json = (await res.json()) as { ok?: boolean; paid?: boolean; state?: string };
 
   console.log("\n11) Razorpay ne paisa liya par callback/webhook kuch nahi aaya");
   check("HTTP 200", res.status, 200);
@@ -478,7 +478,7 @@ function verifyRequest(body: Record<string, string>) {
   PAYMENTS["pay_slow"] = { id: "pay_slow", status: "created", amount: 1100, order_id: "order_slow" };
 
   const first = await status.GET(statusRequest(b.bookingCode));
-  const j1 = (await first.json()) as { paid?: boolean; attempt?: string };
+  const j1 = (await first.json()) as { paid?: boolean; state?: string };
 
   // ab bank ka jawab aa gaya
   PAYMENTS["pay_slow"].status = "captured";
@@ -486,11 +486,11 @@ function verifyRequest(body: Record<string, string>) {
   await new Promise((r) => setTimeout(r, 4200));
 
   const second = await status.GET(statusRequest(b.bookingCode));
-  const j2 = (await second.json()) as { paid?: boolean; attempt?: string };
+  const j2 = (await second.json()) as { paid?: boolean; state?: string };
 
   console.log("\n15) UPI ka jawab der se aaya (pehle 'created', phir 'captured')");
   check("pehli baar: paid=false", j1.paid, false);
-  check("pehli baar: attempt=pending (fail nahi)", j1.attempt, "pending");
+  check("pehli baar: state=pending (fail nahi)", j1.state, "pending");
   check("beech me booking fail nahi hui", (await statusOf(b.id)).p !== "FAILED", true);
   check("doosri baar: paid=true", j2.paid, true);
   check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
@@ -502,11 +502,11 @@ function verifyRequest(body: Record<string, string>) {
   // Razorpay par is order ke liye koi payment darj nahi
 
   const res = await status.GET(statusRequest(b.bookingCode));
-  const json = (await res.json()) as { paid?: boolean; attempt?: string };
+  const json = (await res.json()) as { paid?: boolean; state?: string };
 
   console.log("\n16) User ne payment window band kar di");
   check("paid=false", json.paid, false);
-  check("attempt=none (browser turant ruk jayega)", json.attempt, "none");
+  check("state=none", json.state, "none");
 }
 
 /* ---------- 17. Bank ne mana kar diya ---------- */
@@ -520,11 +520,11 @@ function verifyRequest(body: Record<string, string>) {
   };
 
   const res = await status.GET(statusRequest(b.bookingCode));
-  const json = (await res.json()) as { paid?: boolean; attempt?: string };
+  const json = (await res.json()) as { paid?: boolean; state?: string };
 
   console.log("\n17) Bank ne payment decline kiya");
   check("paid=false", json.paid, false);
-  check("attempt=failed", json.attempt, "failed");
+  check("state=failed", json.state, "failed");
   check("booking confirm nahi hui", (await statusOf(b.id)).s, "PENDING_PAYMENT");
 }
 
@@ -548,7 +548,7 @@ function verifyRequest(body: Record<string, string>) {
   };
 
   const res = await status.GET(statusRequest(b.bookingCode));
-  const json = (await res.json()) as { paid?: boolean; attempt?: string };
+  const json = (await res.json()) as { paid?: boolean; state?: string };
 
   console.log("\n18) Pehli koshish fail, doosri safal (ek hi order)");
   check("paid=true", json.paid, true);
