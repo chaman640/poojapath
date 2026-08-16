@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLang } from "./LanguageProvider";
 import { pick } from "@/lib/i18n";
@@ -40,9 +40,21 @@ type PaytmCheckout = {
   invoke: () => void;
 };
 
+/** Razorpay payment poora hone par yahi teen cheezein wapas deta hai */
+type RazorpaySuccess = {
+  razorpay_order_id?: string;
+  razorpay_payment_id?: string;
+  razorpay_signature?: string;
+};
+
+type RazorpayInstance = {
+  open: () => void;
+  on?: (event: string, cb: (payload: unknown) => void) => void;
+};
+
 declare global {
   interface Window {
-    Razorpay?: new (options: Record<string, unknown>) => { open: () => void };
+    Razorpay?: new (options: Record<string, unknown>) => RazorpayInstance;
     Paytm?: { CheckoutJS?: PaytmCheckout };
   }
 }
@@ -58,6 +70,126 @@ function loadScript(src: string, id?: string): Promise<boolean> {
     s.onerror = () => resolve(false);
     document.body.appendChild(s);
   });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Payment ka peechha karna                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Payment ke baad "kuch hua hi nahi" wali dikkat yahin khatam hoti hai.
+ *
+ * Ab hum Razorpay ke redirect ke bharose nahi baithe. Jaise hi payment
+ * window band hoti hai, browser khud humare server se poochhta rehta hai
+ * ki paisa aaya ya nahi. Server har baar Razorpay se seedha confirm
+ * karta hai. Paisa aate hi hum khud booking page par le jate hain —
+ * aur wahan WhatsApp apne aap khul jata hai.
+ *
+ * Booking code sessionStorage me bhi rakh lete hain, taaki UPI app se
+ * wapas aane par (jab browser ne page dobara load kar diya ho) bhi
+ * peechha jaari rahe.
+ */
+
+const PENDING_KEY = "pp:pending-booking";
+const PENDING_TTL_MS = 30 * 60_000;
+
+function savePending(code: string) {
+  try {
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify({ code, at: Date.now() }));
+  } catch {
+    /* private mode — koi baat nahi, baaki raste kaam karenge */
+  }
+}
+
+function readPending(): string | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as { code?: unknown; at?: unknown };
+    if (typeof v.code !== "string" || typeof v.at !== "number") return null;
+    if (Date.now() - v.at > PENDING_TTL_MS) {
+      sessionStorage.removeItem(PENDING_KEY);
+      return null;
+    }
+    return v.code;
+  } catch {
+    return null;
+  }
+}
+
+function clearPending() {
+  try {
+    sessionStorage.removeItem(PENDING_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Server ka jawab:
+ *   paid    → paisa aa gaya
+ *   pending → koshish chal rahi hai / abhi pata nahi → intezaar karo
+ *   none    → gateway par ek bhi koshish nahi → sach me payment nahi hua
+ *   failed  → bank ne mana kar diya
+ */
+type PayState = "paid" | "pending" | "none" | "failed";
+
+async function askServer(code: string): Promise<PayState> {
+  try {
+    const res = await fetch(`/api/bookings/status?code=${encodeURIComponent(code)}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return "pending";
+    const data = (await res.json()) as { paid?: unknown; attempt?: unknown };
+    if (data.paid === true) return "paid";
+    if (data.attempt === "none" || data.attempt === "failed" || data.attempt === "pending") {
+      return data.attempt;
+    }
+    return "pending";
+  } catch {
+    // Internet gaya — abhi haar mat maano
+    return "pending";
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Paisa aane ka intezaar — par andha intezaar nahi.
+ *
+ * UPI ka jawab aane me 30 se 90 second tak lag jate hain. Isliye jab tak
+ * Razorpay keh raha hai ki koshish chal rahi hai, hum poore `patientTries`
+ * tak rukte hain. Lekin agar Razorpay saaf keh de ki "is order par ek bhi
+ * koshish darj nahi hai" (matlab user ne bas window band ki thi), to lagatar
+ * teen aise jawab ke baad hi haath khada kar dete hain — bekaar me 2 minute
+ * "jaanch rahe hain" nahi dikhate.
+ */
+async function waitForPaid(
+  code: string,
+  alive: () => boolean,
+  patientTries: number,
+): Promise<PayState> {
+  const gaps = [0, 2000, 2500, 3000, 4000, 5000, 5000, 6000, 6000, 7000, 7000, 8000];
+  let emptyInARow = 0;
+
+  for (let i = 0; i < patientTries; i++) {
+    if (!alive()) return "pending";
+    const gap = gaps[Math.min(i, gaps.length - 1)];
+    if (gap) await sleep(gap);
+    if (!alive()) return "pending";
+
+    const state = await askServer(code);
+    if (state === "paid") return "paid";
+    if (state === "failed") return "failed";
+
+    if (state === "none") {
+      emptyInARow++;
+      if (emptyInARow >= 3) return "none";
+    } else {
+      emptyInARow = 0;
+    }
+  }
+  return "pending";
 }
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +273,90 @@ export default function BookingWizard({
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  /* ---- payment ka peechha ---- */
+  const [checking, setChecking] = useState(false);
+  const [lastCode, setLastCode] = useState("");
+  const watchRef = useRef(false);
+
+  /** Booking page par le jao — poora page reload, taaki server sab taaza de */
+  function goToBooking(code: string, paid: boolean) {
+    clearPending();
+    watchRef.current = false;
+    window.location.href = paid ? `/booking/${code}?paid=1` : `/booking/${code}`;
+  }
+
+  /**
+   * Payment window band ho gayi — ab server se poochhte raho.
+   * Paisa mila to booking page (aur wahan se WhatsApp), warna saaf saaf
+   * bata do ki payment nahi hua aur dobara koshish kar sakte hain.
+   */
+  async function watchPayment(code: string, patientTries: number) {
+    if (watchRef.current) return;
+    watchRef.current = true;
+    setLastCode(code);
+    setError("");
+    setChecking(true);
+    setBusy(true);
+
+    const state = await waitForPaid(code, () => watchRef.current, patientTries);
+
+    if (state === "paid") {
+      goToBooking(code, true);
+      return;
+    }
+
+    watchRef.current = false;
+    setChecking(false);
+    setBusy(false);
+
+    if (state === "failed") {
+      setError(
+        lang === "hi"
+          ? "बैंक ने यह भुगतान अस्वीकार कर दिया। अगर आपके खाते से पैसे कट गए हैं तो घबराएँ नहीं — बैंक 3–5 कार्यदिवस में अपने आप वापस कर देता है। आप दोबारा भुगतान कर सकते हैं।"
+          : "The bank declined this payment. If money left your account, don't worry — banks reverse it automatically within 3–5 working days. You can try paying again.",
+      );
+      return;
+    }
+
+    if (state === "none") {
+      setError(
+        lang === "hi"
+          ? "भुगतान नहीं हुआ। आपकी बुकिंग सुरक्षित है — दोबारा भुगतान कर सकते हैं।"
+          : "Payment was not made. Your booking is saved — you can pay again.",
+      );
+      return;
+    }
+
+    // pending — paisa raaste me ho sakta hai. Jhooth mat bolo.
+    setError(
+      lang === "hi"
+        ? "बैंक का जवाब अभी तक नहीं आया। अगर पैसे कट गए हैं तो चिंता न करें — पहुँचते ही बुकिंग अपने आप कन्फर्म हो जाएगी। नीचे 'बुकिंग देखें' दबाकर देखते रहें।"
+        : "The bank hasn't responded yet. If money was deducted, don't worry — the booking confirms itself the moment it lands. Tap 'View booking' below to keep watching.",
+    );
+  }
+
+  /**
+   * UPI app se wapas aaye aur browser ne page dobara load kar diya?
+   * sessionStorage me booking code pada hai — chup-chaap jaanch kar lo.
+   */
+  useEffect(() => {
+    const saved = readPending();
+    if (!saved) return;
+
+    let alive = true;
+    void (async () => {
+      const state = await waitForPaid(saved, () => alive, 14);
+      if (!alive) return;
+      if (state === "paid") goToBooking(saved, true);
+      else clearPending();
+    })();
+
+    return () => {
+      alive = false;
+    };
+    // sirf ek baar, page khulte hi
+  }, []);
 
   const selectedPackage = useMemo(
     () => packages.find((p) => p.id === packageId) ?? packages[0],
@@ -324,6 +540,11 @@ export default function BookingWizard({
         return;
       }
 
+      const code: string = data.bookingCode;
+      // UPI app se wapas aane par page dobara load ho jaye to bhi yaad rahe
+      savePending(code);
+      setLastCode(code);
+
       const rzp = new window.Razorpay({
         key: data.payment.keyId,
         amount: data.payment.amount,
@@ -336,27 +557,64 @@ export default function BookingWizard({
           contact: payload.phone,
           email: payload.email || undefined,
         },
-        notes: { bookingCode: data.bookingCode },
+        notes: { bookingCode: code },
         theme: { color: "#C2410C" },
-        // Payment ke baad Razorpay khud humare server par bhej dega, aur
-        // server user ko booking page par redirect kar dega. JS handler ke
-        // bharose nahi rehte — mobile par UPI app se wapas aane par wo
-        // kabhi-kabhi chalta hi nahi tha.
-        callback_url: `${window.location.origin}/api/payment/razorpay/callback`,
-        redirect: true,
+
+        /**
+         * Payment poora hote hi Razorpay yahi function chalata hai.
+         *
+         * Pehle hum sirf `callback_url` + `redirect: true` par nirbhar the.
+         * Wo tabhi chalta hai jab aapka domain Razorpay account me darj ho;
+         * warna Razorpay chup-chaap window band kar deta hai aur website ko
+         * kabhi pata hi nahi chalta ki paisa aa gaya. Ab hum khud verify
+         * karke booking page par le jate hain — kisi setting par nirbhar nahi.
+         */
+        handler: (resp: RazorpaySuccess) => {
+          setChecking(true);
+          void (async () => {
+            try {
+              const vr = await fetch("/api/payment/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  razorpay_order_id: resp.razorpay_order_id ?? "",
+                  razorpay_payment_id: resp.razorpay_payment_id ?? "",
+                  razorpay_signature: resp.razorpay_signature ?? "",
+                }),
+              });
+              const vd = (await vr.json()) as { ok?: boolean; bookingCode?: string };
+              if (vr.ok && vd.ok) {
+                goToBooking(vd.bookingCode || code, true);
+                return;
+              }
+            } catch {
+              /* neeche wala peechha sambhal lega */
+            }
+            // Verify na ho paya — par paisa kat chuka ho sakta hai.
+            // Server se poochhte raho, wo Razorpay se seedha confirm karega.
+            void watchPayment(code, 26);
+          })();
+        },
+
+        /**
+         * `callback_url` + `redirect: true` jaan-boojh kar hata diye hain.
+         *
+         * Razorpay callback_url tabhi chalata hai jab wo domain aapke
+         * Razorpay account me "Website and app details" me darj ho. Darj
+         * na ho to Razorpay bina kuch bataye window band kar deta hai —
+         * paisa kat jata hai aur website ko khabar hi nahi hoti. Yahi
+         * dikkat aa rahi thi.
+         *
+         * Handler wala raasta kisi setting par nirbhar nahi karta.
+         * (Server ka /api/payment/razorpay/callback route bana hua hai —
+         * domain darj karwa lein to redirect apne aap kaam karega.)
+         */
+
         modal: {
+          // Window band hui — turant "cancelled" mat bolo. Ho sakta hai
+          // paisa UPI app se ja chuka ho. Pehle server se poochh lo.
           ondismiss: () => {
-            // Razorpay redirect kar raha ho tab bhi ondismiss chal jata hai —
-            // thoda ruk kar dekho, page ja raha ho to "cancelled" mat dikhao
-            setTimeout(() => {
-              if (document.visibilityState === "hidden") return;
-              setBusy(false);
-              setError(
-                lang === "hi"
-                  ? "भुगतान रद्द हुआ। आपकी बुकिंग सुरक्षित है — दोबारा प्रयास करें।"
-                  : "Payment cancelled. Your booking is saved — you can try again.",
-              );
-            }, 1200);
+            void watchPayment(code, 24);
           },
         },
       });
@@ -805,13 +1063,49 @@ export default function BookingWizard({
         </div>
       )}
 
+      {/* ---------- Payment ki jaanch chal rahi hai ---------- */}
+      {checking && (
+        <div
+          role="status"
+          className="mt-5 rounded-2xl border-2 border-saffron-300 bg-saffron-50 px-4 py-3.5 text-center"
+        >
+          <p className="text-[14.5px] font-bold text-maroon-800">
+            {lang === "hi"
+              ? "⏳ आपका भुगतान जाँचा जा रहा है…"
+              : "⏳ Checking your payment…"}
+          </p>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink/65">
+            {lang === "hi"
+              ? "कृपया यह पेज बंद न करें। UPI में कभी-कभी एक मिनट तक लग जाता है — पैसे पहुँचते ही बुकिंग अपने आप खुल जाएगी।"
+              : "Please don't close this page. UPI can take up to a minute — your booking will open the moment the payment lands."}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              watchRef.current = false;
+            }}
+            className="mt-2.5 text-[12.5px] font-semibold text-maroon-700 underline underline-offset-2"
+          >
+            {lang === "hi" ? "मैंने भुगतान नहीं किया" : "I didn't pay"}
+          </button>
+        </div>
+      )}
+
       {error && (
-        <p
+        <div
           role="alert"
           className="mt-5 rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-[14px] leading-relaxed text-red-800"
         >
-          {error}
-        </p>
+          <p>{error}</p>
+          {lastCode && (
+            <a
+              href={`/booking/${lastCode}`}
+              className="mt-2 inline-block rounded-full bg-red-700 px-4 py-2 text-[13px] font-bold text-white no-underline"
+            >
+              {lang === "hi" ? "बुकिंग देखें" : "View booking"}
+            </a>
+          )}
+        </div>
       )}
 
       {/* ---------- Bottom bar ---------- */}

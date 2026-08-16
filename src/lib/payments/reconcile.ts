@@ -62,9 +62,9 @@ type BookingRow = typeof bookings.$inferSelect;
 const lastChecked = new Map<string, number>();
 const THROTTLE_MS = 15_000;
 
-function throttled(bookingId: string, now: number): boolean {
+function throttled(bookingId: string, now: number, windowMs = THROTTLE_MS): boolean {
   const prev = lastChecked.get(bookingId);
-  if (prev && now - prev < THROTTLE_MS) return true;
+  if (prev && now - prev < windowMs) return true;
   lastChecked.set(bookingId, now);
   // map ko chhota rakho
   if (lastChecked.size > 500) {
@@ -81,7 +81,7 @@ function throttled(bookingId: string, now: number): boolean {
 
 export async function reconcileBooking(
   booking: BookingRow,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; throttleMs?: number },
 ): Promise<ReconcileReport> {
   const base = {
     bookingId: booking.id,
@@ -114,7 +114,7 @@ export async function reconcileBooking(
     };
   }
 
-  if (!opts?.force && throttled(booking.id, Date.now())) {
+  if (!opts?.force && throttled(booking.id, Date.now(), opts?.throttleMs)) {
     return {
       ...base,
       verdict: "in-progress",
@@ -285,7 +285,7 @@ async function reconcilePaytm(
 
 export async function reconcileBookingById(
   bookingId: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; throttleMs?: number },
 ): Promise<ReconcileReport | null> {
   const [row] = await db.select().from(bookings).where(eq(bookings.id, bookingId)).limit(1);
   if (!row) return null;
@@ -295,8 +295,15 @@ export async function reconcileBookingById(
 /**
  * Booking page khulte hi chalta hai. Chup-chaap — agar gateway se baat
  * na ho paye to user ko kuch nahi dikhta, page normal khulta hai.
+ *
+ * `throttleMs` chhota rakh sakte hain jab koi grahak abhi-abhi payment
+ * karke saamne baitha intezaar kar raha ho (status route). UPI ka jawab
+ * 15 second se der me bhi aata hai, isliye tab jaldi-jaldi poochhna padta hai.
  */
-export async function reconcileByBookingCode(code: string): Promise<ReconcileReport | null> {
+export async function reconcileByBookingCode(
+  code: string,
+  opts?: { throttleMs?: number },
+): Promise<ReconcileReport | null> {
   const [row] = await db
     .select()
     .from(bookings)
@@ -309,7 +316,7 @@ export async function reconcileByBookingCode(code: string): Promise<ReconcileRep
     .limit(1);
 
   if (!row) return null;
-  return reconcileBooking(row).catch(() => null);
+  return reconcileBooking(row, opts).catch(() => null);
 }
 
 /**

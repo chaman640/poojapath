@@ -88,6 +88,8 @@ const { bookings, packages, pujas } = await import("../src/db/schema");
 const { eq } = await import("drizzle-orm");
 const callback = await import("../src/app/api/payment/razorpay/callback/route");
 const webhook = await import("../src/app/api/payment/webhook/route");
+const verify = await import("../src/app/api/payment/verify/route");
+const status = await import("../src/app/api/bookings/status/route");
 
 let pass = 0;
 let fail = 0;
@@ -360,6 +362,207 @@ console.log("\n🧪 Payment ke baad ka poora raasta\n");
   console.log("\n10) Webhook URL browser me kholne par");
   check("HTTP 200", res.status, 200);
   check("sahi endpoint bataya", json.endpoint, "razorpay-webhook");
+}
+
+/* ================================================================== *
+ *  Naya raasta: browser khud poochhta hai "paisa aaya kya?"
+ *
+ *  Ye wahi haalat hai jo asli site par ho rahi thi — Razorpay ne paisa
+ *  le liya par callback_url par kabhi POST kiya hi nahi, aur webhook bhi
+ *  nahi aaya. Pehle booking hamesha pending padi rehti thi. Ab browser
+ *  khud poochhta hai aur server Razorpay se seedha confirm kar leta hai.
+ * ================================================================== */
+
+function statusRequest(code: string) {
+  return new Request(
+    `https://anusthanpooja.site/api/bookings/status?code=${encodeURIComponent(code)}`,
+    { headers: { host: "anusthanpooja.site" } },
+  );
+}
+
+function verifyRequest(body: Record<string, string>) {
+  return new Request("https://anusthanpooja.site/api/payment/verify", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      host: "anusthanpooja.site",
+      origin: "https://anusthanpooja.site",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+/* ---------- 11. Callback bilkul nahi aaya (ASLI DIKKAT) ---------- */
+{
+  const b = await makeBooking("order_nocb", 1100);
+  PAYMENTS["pay_nocb"] = {
+    id: "pay_nocb",
+    status: "captured",
+    amount: 1100,
+    order_id: "order_nocb",
+  };
+
+  // Na callback, na webhook — sirf browser ka sawaal
+  const res = await status.GET(statusRequest(b.bookingCode));
+  const json = (await res.json()) as { ok?: boolean; paid?: boolean; status?: string };
+
+  console.log("\n11) Razorpay ne paisa liya par callback/webhook kuch nahi aaya");
+  check("HTTP 200", res.status, 200);
+  check("paid=true mila", json.paid, true);
+  check("booking CONFIRMED ho gayi", (await statusOf(b.id)).s, "CONFIRMED");
+}
+
+/* ---------- 12. Handler wala raasta (verify route) ---------- */
+{
+  const b = await makeBooking("order_hnd", 1100);
+  PAYMENTS["pay_hnd"] = {
+    id: "pay_hnd",
+    status: "captured",
+    amount: 1100,
+    order_id: "order_hnd",
+  };
+
+  const res = await verify.POST(
+    verifyRequest({
+      razorpay_order_id: "order_hnd",
+      razorpay_payment_id: "pay_hnd",
+      razorpay_signature: checkoutSignature("order_hnd", "pay_hnd"),
+    }),
+  );
+  const json = (await res.json()) as { ok?: boolean; bookingCode?: string };
+
+  console.log("\n12) Checkout ka handler chala (redirect ke bina)");
+  check("HTTP 200", res.status, 200);
+  check("wahi booking code wapas aaya", json.bookingCode, b.bookingCode);
+  check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
+}
+
+/* ---------- 13. Paisa aaya hi nahi — jhoothi confirm nahi honi chahiye ---------- */
+{
+  const b = await makeBooking("order_unpaid", 1100);
+  // PAYMENTS me kuch nahi daala — matlab Razorpay par koi payment hai hi nahi
+
+  const res = await status.GET(statusRequest(b.bookingCode));
+  const json = (await res.json()) as { paid?: boolean };
+
+  console.log("\n13) Payment hua hi nahi");
+  check("paid=false", json.paid, false);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* ---------- 14. Raashi alag ho to status route bhi confirm na kare ---------- */
+{
+  const b = await makeBooking("order_short", 165100);
+  PAYMENTS["pay_short"] = {
+    id: "pay_short",
+    status: "captured",
+    amount: 100, // ₹1 bheja, chahiye tha ₹1651
+    order_id: "order_short",
+  };
+
+  const res = await status.GET(statusRequest(b.bookingCode));
+  const json = (await res.json()) as { paid?: boolean };
+
+  console.log("\n14) Kam paisa aaya");
+  check("paid=false", json.paid, false);
+  check("booking pending hi rahi", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* ---------- 15. UPI dheere aaya: pehle 'created', phir 'captured' ---------- *
+ *  Yahi wo haalat hai jisme payment "fail" dikhta tha jabki paisa kat gaya
+ *  hota tha. Server ko dono baar sahi jawab dena chahiye — pehle "ruko",
+ *  phir "ho gaya" — aur beech me booking ko fail NAHI karna chahiye.
+ */
+{
+  const b = await makeBooking("order_slow", 1100);
+  PAYMENTS["pay_slow"] = { id: "pay_slow", status: "created", amount: 1100, order_id: "order_slow" };
+
+  const first = await status.GET(statusRequest(b.bookingCode));
+  const j1 = (await first.json()) as { paid?: boolean; attempt?: string };
+
+  // ab bank ka jawab aa gaya
+  PAYMENTS["pay_slow"].status = "captured";
+  // 4 second ka throttle beet jaane do
+  await new Promise((r) => setTimeout(r, 4200));
+
+  const second = await status.GET(statusRequest(b.bookingCode));
+  const j2 = (await second.json()) as { paid?: boolean; attempt?: string };
+
+  console.log("\n15) UPI ka jawab der se aaya (pehle 'created', phir 'captured')");
+  check("pehli baar: paid=false", j1.paid, false);
+  check("pehli baar: attempt=pending (fail nahi)", j1.attempt, "pending");
+  check("beech me booking fail nahi hui", (await statusOf(b.id)).p !== "FAILED", true);
+  check("doosri baar: paid=true", j2.paid, true);
+  check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
+}
+
+/* ---------- 16. User ne bas window band kar di ---------- */
+{
+  const b = await makeBooking("order_closed", 1100);
+  // Razorpay par is order ke liye koi payment darj nahi
+
+  const res = await status.GET(statusRequest(b.bookingCode));
+  const json = (await res.json()) as { paid?: boolean; attempt?: string };
+
+  console.log("\n16) User ne payment window band kar di");
+  check("paid=false", json.paid, false);
+  check("attempt=none (browser turant ruk jayega)", json.attempt, "none");
+}
+
+/* ---------- 17. Bank ne mana kar diya ---------- */
+{
+  const b = await makeBooking("order_declined", 1100);
+  PAYMENTS["pay_declined"] = {
+    id: "pay_declined",
+    status: "failed",
+    amount: 1100,
+    order_id: "order_declined",
+  };
+
+  const res = await status.GET(statusRequest(b.bookingCode));
+  const json = (await res.json()) as { paid?: boolean; attempt?: string };
+
+  console.log("\n17) Bank ne payment decline kiya");
+  check("paid=false", json.paid, false);
+  check("attempt=failed", json.attempt, "failed");
+  check("booking confirm nahi hui", (await statusOf(b.id)).s, "PENDING_PAYMENT");
+}
+
+/* ---------- 18. Pehli koshish fail, doosri safal ---------- *
+ *  Ek hi order par do payment attempt hote hain. Purani fail wali koshish
+ *  ki wajah se nayi safal booking kabhi fail nahi honi chahiye.
+ */
+{
+  const b = await makeBooking("order_retry", 1100);
+  PAYMENTS["pay_retry_bad"] = {
+    id: "pay_retry_bad",
+    status: "failed",
+    amount: 1100,
+    order_id: "order_retry",
+  };
+  PAYMENTS["pay_retry_ok"] = {
+    id: "pay_retry_ok",
+    status: "captured",
+    amount: 1100,
+    order_id: "order_retry",
+  };
+
+  const res = await status.GET(statusRequest(b.bookingCode));
+  const json = (await res.json()) as { paid?: boolean; attempt?: string };
+
+  console.log("\n18) Pehli koshish fail, doosri safal (ek hi order)");
+  check("paid=true", json.paid, true);
+  check("booking CONFIRMED", (await statusOf(b.id)).s, "CONFIRMED");
+}
+
+/* ---------- 19. Ulta-seedha code ---------- */
+{
+  const bad = await status.GET(statusRequest("../../etc/passwd"));
+  const missing = await status.GET(statusRequest("PP-999999-ZZZZZZ"));
+
+  console.log("\n19) Galat booking code");
+  check("gande code par 400", bad.status, 400);
+  check("na-maujood code par 404", missing.status, 404);
 }
 
 await db.delete(bookings).where(eq(bookings.phone, TEST_PHONE));
