@@ -91,6 +91,15 @@ function loadScript(src: string, id?: string): Promise<boolean> {
  * peechha jaari rahe.
  */
 
+/**
+ * Screen par chhota sa nishaan — "🔒 Surakshit bhugtan · p7".
+ *
+ * Isse ek nazar me pata chal jata hai ki live site par kaunsa code chal
+ * raha hai. Payment ka koi badlaav karein to ye number bhi badha dein,
+ * warna "deploy hua ya nahi" ka andaza lagana padta hai.
+ */
+const PAY_BUILD = "p7";
+
 const PENDING_KEY = "pp:pending-booking";
 const PENDING_TTL_MS = 30 * 60_000;
 
@@ -259,13 +268,55 @@ export default function BookingWizard({
   const [checking, setChecking] = useState(false);
   const [tick, setTick] = useState(0);
   const [lastCode, setLastCode] = useState("");
-  const watchRef = useRef(false);
+  const watchRef = useRef(false); // dikhne wali jaanch (overlay ke saath)
+  const guardRef = useRef(0); // chup-chaap chalne wala pehredaar (koshish ka number)
 
   /** Booking page par le jao — poora page reload, taaki server sab taaza de */
   function goToBooking(code: string, paid: boolean) {
     clearPending();
     watchRef.current = false;
+    guardRef.current += 1; // pehredaar ko bhi rok do
     window.location.href = paid ? `/booking/${code}?paid=1` : `/booking/${code}`;
+  }
+
+  /**
+   * Chup-chaap pehredaar — payment window khulte hi shuru ho jata hai.
+   *
+   * ⚠️ Ye sabse zaroori hissa hai. Pehle hum tabhi jaanch shuru karte the
+   * jab Razorpay kuch batata tha (handler ya window band hona). Par asliyat
+   * me Razorpay kabhi-kabhi "Processing your payment…" par hi atka reh jata
+   * hai — na handler chalata hai, na window band karta hai. Aise me humari
+   * jaanch shuru hi nahi hoti thi, jabki paisa kat chuka hota tha.
+   *
+   * Ab jaanch Razorpay ke bharose nahi hai: window khulte hi hum khud har
+   * 5 second par server se poochhna shuru kar dete hain, poore 5 minute tak.
+   * Paisa aate hi seedha booking page — Razorpay chahe kuch kahe ya na kahe.
+   *
+   * Ye bilkul chup rehta hai — na koi message, na koi loading. Sirf paisa
+   * milne par kaam karta hai. Grahak ko iska pata bhi nahi chalta.
+   */
+  async function startGuard(code: string) {
+    // Har nayi koshish ko apna number milta hai. Purani koshish jaag kar
+    // nayi wali ko band na kar de, isliye boolean ki jagah number.
+    const my = guardRef.current + 1;
+    guardRef.current = my;
+
+    const state = await watchForPayment({
+      // Kabhi khud se "nahi hua" ka faisla nahi karta — wo kaam overlay
+      // wali jaanch ka hai. Ye sirf "paisa aaya" dhoondhta hai.
+      minChecks: 60,
+      maxChecks: 60,
+      noneAfter: Number.MAX_SAFE_INTEGER,
+      failedAfter: Number.MAX_SAFE_INTEGER,
+      gapMs: GAP_MS,
+      ask: () => askServer(code),
+      wait: sleep,
+      // overlay wali jaanch shuru ho jaye to pehredaar hat jata hai
+      alive: () => guardRef.current === my && !watchRef.current,
+    });
+
+    if (guardRef.current !== my) return; // koi nayi koshish le chuki hai
+    if (state === "paid") goToBooking(code, true);
   }
 
   /**
@@ -276,6 +327,7 @@ export default function BookingWizard({
   async function watchPayment(code: string, minChecks: number, maxChecks: number) {
     if (watchRef.current) return;
     watchRef.current = true;
+    guardRef.current += 1; // chup-chaap wala hat jaye, ab overlay sambhalega
     setLastCode(code);
     setError("");
     setTick(0);
@@ -608,6 +660,12 @@ export default function BookingWizard({
       });
 
       rzp.open();
+
+      /**
+       * Aur yahin se pehredaar bhi chalu. Razorpay ki window abhi khuli hai;
+       * wo kuch bataye ya na bataye, paisa aate hi hum booking page khol denge.
+       */
+      void startGuard(code);
     } catch {
       setError(
         lang === "hi" ? "नेटवर्क समस्या। दोबारा कोशिश करें।" : "Network problem. Please try again.",
@@ -1171,7 +1229,8 @@ export default function BookingWizard({
         )}
         {isLast && (
           <p className="pb-1 pt-2 text-center text-[11.5px] text-ink/50">
-            🔒 {t.booking.securePay}
+            🔒 {t.booking.securePay}{" "}
+            <span className="text-ink/30">· {PAY_BUILD}</span>
           </p>
         )}
       </div>
