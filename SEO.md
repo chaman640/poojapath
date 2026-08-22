@@ -163,3 +163,50 @@ Jo bhi kahe "ek hafte me pehla number", wo jhooth bol raha hai.
 | Sitemap | `anusthanpooja.site/sitemap.xml` |
 | robots | `anusthanpooja.site/robots.txt` |
 | WhatsApp card | Kisi ko link bhej kar dekh lein |
+
+---
+
+# 📊 Meta Pixel — Facebook / Instagram ads ke liye
+
+Pixel lag chuka hai. Bas **ID daalni baaki hai** — uske bina wo poori tarah band rehta hai (na script load hoti hai, na koi request jati hai).
+
+## ID kahan se milegi (5 minute)
+
+1. https://business.facebook.com/events_manager kholiye
+2. **Connect data sources → Web → Connect**
+3. Pixel ka naam: `Anusthan Pooja`
+4. Website: `https://anusthanpooja.site`
+5. Ban jaane par upar **15-16 digit ka number** dikhega — wahi ID hai, copy kar lijiye
+
+## Render me daalna
+
+Render → apni service → **Environment** → Add:
+
+| Key | Value |
+|---|---|
+| `NEXT_PUBLIC_META_PIXEL_ID` | wahi number |
+
+Save → deploy hone dijiye. Bas.
+
+## Jaanchne ke liye
+
+Chrome me **Meta Pixel Helper** extension lagayiye, phir site kholiye. Neela icon hara ho jaye aur `PageView` dikhe — Pixel chal raha hai.
+
+## Kaun se event apne aap jate hain
+
+| Kab | Event | Kya bhejta hai |
+|---|---|---|
+| Koi bhi page khule | `PageView` | — |
+| Puja ka page khule | `ViewContent` | puja ka naam, daam |
+| "अभी भुगतान करें" daba | `InitiateCheckout` | raashi |
+| Booking confirm ho | `Purchase` | raashi, puja ka naam |
+
+`Purchase` har booking par **sirf ek baar** jata hai — page refresh karne par dobara nahi. Warna Ads Manager me nakli bikri dikhne lagti hai aur Meta usi galat data par optimize karta rehta hai.
+
+**Grahak ki niji jaankari kabhi nahi jati** — naam, number, gotra, pata, booking code: kuch bhi nahi. Sirf itna ki "kisi ne puja dekhi", "kisi ne ₹201 diya".
+
+## Pixel ka asli faayda kab milega
+
+Aaj nahi — **kal**. Abhi wo chup-chaap data jama kar raha hai. Jab 50-100 booking ho jayengi, tab Meta ke paas ye samajhne layak data hoga ki aapka kharidaar kaisa dikhta hai, aur wo khud waise log dhoondhne lagega (Lookalike Audience). Wahan se ad ka kharch aadha ho jata hai.
+
+**Isliye ID aaj hi daal dijiye**, chahe ad agle mahine chalayein. Jitna purana data, utna behtar.

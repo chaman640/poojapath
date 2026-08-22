@@ -17,6 +17,8 @@ const scriptSrc = [
   isDev ? "'unsafe-eval'" : "",
   "https://checkout.razorpay.com https://*.razorpay.com",
   "https://securegw.paytm.in https://securegw-stage.paytm.in",
+  // Meta Pixel (sirf tab load hota hai jab Pixel ID set ho)
+  "https://connect.facebook.net",
 ]
   .filter(Boolean)
   .join(" ");
@@ -29,7 +31,7 @@ const csp = [
   // Photos Cloudinary se aati hain; admin manually koi doosra https link bhi
   // paste kar sakta hai, isliye https images allow hain (sirf images).
   "img-src 'self' data: blob: https:",
-  "connect-src 'self' https://*.razorpay.com https://lumberjack.razorpay.com https://api.cloudinary.com https://securegw.paytm.in https://securegw-stage.paytm.in",
+  "connect-src 'self' https://*.razorpay.com https://lumberjack.razorpay.com https://api.cloudinary.com https://securegw.paytm.in https://securegw-stage.paytm.in https://www.facebook.com https://connect.facebook.net",
   "frame-src 'self' https://api.razorpay.com https://*.razorpay.com https://securegw.paytm.in https://securegw-stage.paytm.in",
   "form-action 'self' https://api.razorpay.com https://*.razorpay.com https://securegw.paytm.in https://securegw-stage.paytm.in",
   "frame-ancestors 'none'",

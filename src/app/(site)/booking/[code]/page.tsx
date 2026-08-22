@@ -8,6 +8,7 @@ import PujaImage from "@/components/PujaImage";
 import BookingTimeline from "@/components/BookingTimeline";
 import BookingPendingWatch from "@/components/BookingPendingWatch";
 import BookingWhatsapp from "@/components/BookingWhatsapp";
+import PixelEvent from "@/components/PixelEvent";
 import { reconcileByBookingCode } from "@/lib/payments/reconcile";
 import { getLangDict } from "@/lib/lang-server";
 import { pick } from "@/lib/i18n";
@@ -145,6 +146,22 @@ export default async function BookingStatusPage({
 
   return (
     <div className="container-x max-w-4xl py-10 sm:py-14">
+      {/*
+        Meta ko bikri ki khabar — sirf jab booking sach me confirm ho.
+        `once` me booking code hai, isliye page refresh karne par ye
+        dobara nahi jata (warna Ads Manager me nakli bikri dikhne lagti
+        hai, aur Meta usi galat data par optimize karta rehta hai).
+      */}
+      {isConfirmed && (
+        <PixelEvent
+          event="Purchase"
+          once={booking.bookingCode}
+          value={booking.amountInPaise / 100}
+          contentName={puja.titleEn}
+          contentIds={[puja.slug]}
+        />
+      )}
+
       {/* -------- Success banner -------- */}
       <div
         className={

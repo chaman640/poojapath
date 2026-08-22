@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { Suspense } from "react";
+import MetaPixel from "@/components/MetaPixel";
 import { getLang } from "@/lib/lang-server";
 import { siteConfig } from "@/lib/env";
 import {
@@ -161,7 +163,13 @@ export default async function RootLayout({
           dangerouslySetInnerHTML={{ __html: JSON.stringify(graph) }}
         />
       </head>
-      <body className="flex min-h-screen flex-col">{children}</body>
+      <body className="flex min-h-screen flex-col">
+        {/* Meta Pixel — NEXT_PUBLIC_META_PIXEL_ID set ho tabhi chalta hai */}
+        <Suspense fallback={null}>
+          <MetaPixel />
+        </Suspense>
+        {children}
+      </body>
     </html>
   );
 }

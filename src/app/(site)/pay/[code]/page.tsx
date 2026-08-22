@@ -161,6 +161,7 @@ export default async function PayPage({ params }: { params: Params }) {
           <PayBox
             code={booking.bookingCode}
             amountLabel={formatINR(booking.amountInPaise)}
+            amountValue={booking.amountInPaise / 100}
             brand={t.brand}
             pujaTitle={title}
             devoteeName={booking.devoteeName}

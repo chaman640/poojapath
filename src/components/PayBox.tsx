@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { waitForPayment, type PayState } from "@/lib/payments/wait";
+import { track } from "@/lib/pixel";
 
 /**
  * Payment page ka chalta-phirta hissa.
@@ -96,10 +97,12 @@ export default function PayBox({
   phone,
   email,
   session,
+  amountValue,
   hi,
 }: {
   code: string;
   amountLabel: string;
+  amountValue: number;
   brand: string;
   pujaTitle: string;
   devoteeName: string;
@@ -170,6 +173,10 @@ export default function PayBox({
     setNote("");
     setOpenFailed(false);
     setPhase("waiting");
+
+    // Meta ko: is grahak ne payment shuru kiya. Purchase se pehle ka
+    // sabse kaam ka signal — isi par Meta "kharidne wale" pehchanta hai.
+    track("InitiateCheckout", { value: amountValue, currency: "INR", content_name: pujaTitle });
 
     /* ---------------- Demo ---------------- */
     if (session.mode === "demo") {

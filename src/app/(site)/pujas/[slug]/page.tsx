@@ -4,6 +4,7 @@ import Link from "next/link";
 import PujaImage from "@/components/PujaImage";
 import BookingWizard from "@/components/BookingWizard";
 import PujaCard from "@/components/PujaCard";
+import PixelEvent from "@/components/PixelEvent";
 import { getLangDict } from "@/lib/lang-server";
 import { pick, pickList } from "@/lib/i18n";
 import { formatDate, formatINR } from "@/lib/utils";
@@ -151,6 +152,14 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
 
   return (
     <>
+      {/* Meta ko: kisi ne ye puja dekhi (retargeting ka pehla kadam) */}
+      <PixelEvent
+        event="ViewContent"
+        contentName={puja.titleEn}
+        contentIds={[slug]}
+        value={minPrice / 100}
+      />
+
       <script
         type="application/ld+json"
         // JSON ke andar "<" ko escape kar dete hain taaki koi </script> se
