@@ -23,6 +23,8 @@ export type PujaListItem = Awaited<ReturnType<typeof getUpcomingPujas>>[number];
 export async function getUpcomingPujas(opts?: {
   q?: string;
   category?: string;
+  /** Sirf ek hi mandir ki pujaein — /mandir/<slug> page ke liye */
+  temple?: string;
   featuredOnly?: boolean;
   limit?: number;
 }) {
@@ -32,6 +34,10 @@ export async function getUpcomingPujas(opts?: {
 
   if (opts?.category) {
     conditions.push(eq(categories.slug, opts.category));
+  }
+
+  if (opts?.temple) {
+    conditions.push(eq(temples.slug, opts.temple));
   }
 
   if (opts?.q) {
@@ -189,6 +195,12 @@ export async function getFaqs(limit = 10) {
 
 export async function getTemples() {
   return db.select().from(temples).orderBy(asc(temples.nameEn));
+}
+
+/** Ek mandir ka poora vivaran — /mandir/<slug> page ke liye */
+export async function getTempleBySlug(slug: string) {
+  const [row] = await db.select().from(temples).where(eq(temples.slug, slug)).limit(1);
+  return row ?? null;
 }
 
 /** Site stats — homepage trust bar ke liye */

@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 const links = (t: ReturnType<typeof useLang>["t"]) => [
   { href: "/", label: t.nav.home },
   { href: "/pujas", label: t.nav.pujas },
+  { href: "/mandir", label: t.nav.temples },
   { href: "/offerings", label: t.nav.offerings },
   { href: "/products", label: t.nav.products },
   { href: "/track", label: t.nav.track },

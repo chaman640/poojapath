@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import Hero from "@/components/Hero";
 import TrustBar from "@/components/TrustBar";
@@ -20,6 +21,28 @@ import {
   getTestimonials,
   getUpcomingPujas,
 } from "@/lib/queries";
+import { breadcrumbJsonLd, faqJsonLd, ogImageUrl } from "@/lib/seo";
+
+/**
+ * Home page ka apna title aur description.
+ *
+ * Layout wala default har page par lag jata hai, par home page site ka
+ * chehra hai — iska title me wahi shabd hone chahiye jo log Google me
+ * type karte hain: "online puja booking", "मंदिर में पूजा".
+ */
+export const metadata: Metadata = {
+  title: "Online Puja Booking at India's Sacred Temples | ऑनलाइन पूजा बुकिंग",
+  description:
+    "Book Vedic puja at India's holiest temples online. Temple pandits take your name and gotra in the sankalp, you receive the full puja video, and temple prasad is delivered to your home. Rudrabhishek, Kaal Sarp Dosh, Pitru Dosh, Navgrah Shanti and more.",
+  alternates: { canonical: "/" },
+  openGraph: {
+    url: "/",
+    title: "Online Puja Booking at India's Sacred Temples",
+    description:
+      "Sankalp with your name and gotra, full puja video, temple prasad at home.",
+    images: [{ url: ogImageUrl(), width: 1200, height: 630 }],
+  },
+};
 
 export default async function HomePage() {
   const { lang, t } = await getLangDict();
@@ -35,8 +58,27 @@ export default async function HomePage() {
 
   const waNumber = siteConfig.whatsapp.replace(/\D/g, "");
 
+  /**
+   * Sawal-jawab Google ko bhi bata dete hain.
+   *
+   * Iska seedha fayda: Google kabhi-kabhi ye sawal apne result me hi
+   * khol deta hai, jisse aapki jagah result me badi ho jati hai aur
+   * click badhte hain. Sawal wahi hain jo page par dikhte hain — Google
+   * chhupa hua content pasand nahi karta.
+   */
+  const pageJsonLd = [
+    breadcrumbJsonLd([{ name: "Home", path: "/" }]),
+    ...(faqs.length
+      ? [faqJsonLd(faqs.map((f) => ({ q: f.questionEn, a: f.answerEn })))]
+      : []),
+  ];
+
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(pageJsonLd) }}
+      />
       <Hero lang={lang} stats={stats} />
       <TrustBar lang={lang} stats={stats} />
 

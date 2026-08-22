@@ -9,6 +9,7 @@ import { pick, pickList } from "@/lib/i18n";
 import { formatDate, formatINR } from "@/lib/utils";
 import {siteConfig} from "@/lib/env";
 import { getPujaBySlug, getUpcomingPujas } from "@/lib/queries";
+import { abs, breadcrumbJsonLd, ogImageUrl, pujaProductJsonLd } from "@/lib/seo";
 import { isPaymentLive } from "@/lib/payments";
 
 type Params = Promise<{ slug: string }>;
@@ -22,10 +23,46 @@ export async function generateMetadata({
   const data = await getPujaBySlug(slug);
   if (!data) return { title: "Puja not found" };
 
+  const { puja, temple } = data;
+  const templeBit = temple ? ` at ${temple.nameEn}, ${temple.cityEn}` : "";
+
+  /**
+   * Title me puja ka naam + mandir + shahar — teeno.
+   *
+   * Log "rudrabhishek kashi vishwanath" jaise poore vaakya se dhoondhte
+   * hain. Title me wahi shabd hone se hi wo page match karta hai.
+   */
+  const title = `${puja.titleEn}${templeBit} — Book Online`;
+  const description =
+    (puja.subtitleEn || puja.descriptionEn).slice(0, 150).trim() +
+    ` Sankalp with your name and gotra, full puja video, and temple prasad at home.`;
+
   return {
-    title: data.puja.titleEn,
-    description: data.puja.subtitleEn || data.puja.descriptionEn.slice(0, 155),
+    title,
+    description,
+    keywords: [
+      puja.titleEn,
+      puja.titleHi,
+      `${puja.titleEn} online booking`,
+      `${puja.titleEn} puja`,
+      ...(temple ? [temple.nameEn, temple.nameHi, `puja at ${temple.nameEn}`, `${temple.cityEn} mandir puja`] : []),
+      "online puja booking",
+      "ऑनलाइन पूजा बुकिंग",
+    ],
     alternates: { canonical: `/pujas/${slug}` },
+    openGraph: {
+      type: "article",
+      url: `/pujas/${slug}`,
+      title,
+      description,
+      images: [{ url: puja.imageUrl || ogImageUrl(), width: 1200, height: 630, alt: puja.titleEn }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [puja.imageUrl || ogImageUrl()],
+    },
   };
 }
 
@@ -54,18 +91,32 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
   const seatsLeft =
     puja.seatsTotal != null ? Math.max(puja.seatsTotal - puja.seatsBooked, 0) : null;
 
-  const jsonLd = {
+  /**
+   * Google ko teen tarah se batate hain — teeno alag kaam karte hain:
+   *
+   *  • **Event**   — "kab hai" (tithi ke saath result me dikhta hai)
+   *  • **Product** — "kitne ka hai" (daam aur "available" result me aata hai)
+   *  • **Breadcrumb** — "Home › Pujas › ..." wali patti
+   */
+  const eventLd = {
     "@context": "https://schema.org",
     "@type": "Event",
     name: puja.titleEn,
     startDate: puja.pujaDate.toISOString(),
     eventAttendanceMode: "https://schema.org/OnlineEventAttendanceMode",
     eventStatus: "https://schema.org/EventScheduled",
-    description: puja.subtitleEn,
+    description: puja.subtitleEn || puja.descriptionEn.slice(0, 250),
+    image: [puja.imageUrl || ogImageUrl()],
+    url: abs(`/pujas/${slug}`),
     location: {
       "@type": "Place",
       name: temple?.nameEn ?? "Temple",
-      address: `${temple?.cityEn ?? ""}, ${temple?.stateEn ?? ""}, India`,
+      address: {
+        "@type": "PostalAddress",
+        addressLocality: temple?.cityEn ?? "",
+        addressRegion: temple?.stateEn ?? "",
+        addressCountry: "IN",
+      },
     },
     organizer: { "@type": "Organization", name: siteConfig.name, url: siteConfig.url },
     offers: {
@@ -74,9 +125,29 @@ export default async function PujaDetailPage({ params }: { params: Params }) {
       priceCurrency: "INR",
       availability:
         seatsLeft === 0 ? "https://schema.org/SoldOut" : "https://schema.org/InStock",
-      url: `${siteConfig.url}/pujas/${slug}`,
+      url: abs(`/pujas/${slug}`),
+      validFrom: new Date().toISOString(),
     },
   };
+
+  const jsonLd = [
+    eventLd,
+    pujaProductJsonLd({
+      slug,
+      title: puja.titleEn,
+      description: puja.subtitleEn || puja.descriptionEn,
+      image: puja.imageUrl,
+      minPriceInPaise: minPrice,
+      templeName: temple?.nameEn,
+      available: seatsLeft !== 0,
+      validUntil: puja.pujaDate,
+    }),
+    breadcrumbJsonLd([
+      { name: "Home", path: "/" },
+      { name: "Pujas", path: "/pujas" },
+      { name: puja.titleEn, path: `/pujas/${slug}` },
+    ]),
+  ];
 
   return (
     <>

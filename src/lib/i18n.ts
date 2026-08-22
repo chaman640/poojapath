@@ -19,6 +19,7 @@ export const dict = {
     nav: {
       home: "Home",
       pujas: "Upcoming Pujas",
+      temples: "Temples",
       offerings: "Chadhava",
       products: "Divine Store",
       track: "Track Booking",
@@ -192,6 +193,7 @@ export const dict = {
     nav: {
       home: "होम",
       pujas: "आगामी पूजा",
+      temples: "मंदिर",
       offerings: "चढ़ावा",
       products: "दिव्य भंडार",
       track: "बुकिंग देखें",
